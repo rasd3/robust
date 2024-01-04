@@ -8,7 +8,7 @@ from mmdet3d.registry import DATASETS
 from mmdet3d.structures import LiDARInstance3DBoxes
 from mmdet3d.structures.bbox_3d.cam_box3d import CameraInstance3DBoxes
 from .det3d_dataset import Det3DDataset
-
+import math, pickle
 
 @DATASETS.register_module()
 class NuScenesDataset(Det3DDataset):
@@ -89,6 +89,12 @@ class NuScenesDataset(Det3DDataset):
                  test_mode: bool = False,
                  with_velocity: bool = True,
                  use_valid_flag: bool = False,
+                 use_sequence_group_flag=False,
+                 sequences_split_num=1,
+                 spatial_misalignment=False,
+                 camera_stuck=False,
+                 lidar_stuck=False,
+                 object_failure=False,
                  **kwargs) -> None:
         self.use_valid_flag = use_valid_flag
         self.with_velocity = with_velocity
@@ -97,7 +103,28 @@ class NuScenesDataset(Det3DDataset):
         assert load_type in ('frame_based', 'mv_image_based',
                              'fov_image_based')
         self.load_type = load_type
-
+        self.use_sequence_group_flag = use_sequence_group_flag
+        self.sequences_split_num = sequences_split_num
+        self.spatial_misalignment = spatial_misalignment
+        if self.spatial_misalignment:
+            self.extrinsics_noise = True
+            self.extrinsics_noise_type = 'all' # 'single'
+            self.noise_sensor_type = 'camera'
+            print(f'add {self.extrinsics_noise_type} noise to extrinsics')
+        self.lidar_stuck = lidar_stuck
+        self.camera_stuck = camera_stuck
+        if camera_stuck or lidar_stuck:
+            self.drop_frames = True
+            self.drop_ratio = 50
+            self.drop_type = 'consecutive'
+            self.noise_sensor_type = 'camera' if camera_stuck else 'lidar'
+            print('frame drop setting: drop ratio:', self.drop_ratio, ', sensor type:', self.noise_sensor_type, ', drop type:', self.drop_type)
+        if self.spatial_misalignment or camera_stuck or lidar_stuck:
+            noise_nuscenes_ann_file = 'data/nuscenes/nuscenes_infos_val_with_noise.pkl'
+            noise_data = pickle.load(open(noise_nuscenes_ann_file,'rb'))
+            self.noise_data = noise_data[self.noise_sensor_type]
+        self.object_failure = object_failure
+            
         assert box_type_3d.lower() in ('lidar', 'camera')
         super().__init__(
             data_root=data_root,
@@ -107,7 +134,43 @@ class NuScenesDataset(Det3DDataset):
             box_type_3d=box_type_3d,
             filter_empty_gt=filter_empty_gt,
             test_mode=test_mode,
-            **kwargs)
+            **kwargs)    
+        # sequences_split_num splits eacgh sequence into sequences_split_num parts.
+        if self.test_mode:
+            assert self.sequences_split_num == 1
+        if self.use_sequence_group_flag:
+            self._set_sequence_group_flag() # Must be called after load_annotations b/c load_annotations does sorting.
+
+    def _set_sequence_group_flag(self):
+        """
+        Set each sequence to be a different group
+        """
+        
+        res = pickle.load(open("data.pickle",'rb'))
+        self.flag = np.array(res, dtype=np.int64)
+
+        if self.sequences_split_num != 1:
+            if self.sequences_split_num == 'all':
+                self.flag = np.array(range(28130), dtype=np.int64)
+            else:
+                bin_counts = np.bincount(self.flag)
+                new_flags = []
+                curr_new_flag = 0
+                for curr_flag in range(len(bin_counts)):
+                    curr_sequence_length = np.array(
+                        list(range(0, 
+                                bin_counts[curr_flag], 
+                                math.ceil(bin_counts[curr_flag] / self.sequences_split_num)))
+                        + [bin_counts[curr_flag]])
+
+                    for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
+                        for _ in range(sub_seq_idx):
+                            new_flags.append(curr_new_flag)
+                        curr_new_flag += 1
+
+                assert len(new_flags) == len(self.flag)
+                assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num
+                self.flag = np.array(new_flags, dtype=np.int64)
 
     def _filter_with_mask(self, ann_info: dict) -> dict:
         """Remove annotations that do not need to be cared.

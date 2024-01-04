@@ -31,7 +31,18 @@ class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
         set_default_scale (bool): Whether to set default scale.
             Defaults to True.
     """
-
+    
+    def __init__(self,
+                 to_float32: bool = False,
+                 color_type: str = 'unchanged',
+                 backend_args: Optional[dict] = None,
+                 camera_view_drop = False) -> None:
+        super().__init__(to_float32=to_float32, color_type=color_type, backend_args=backend_args)
+        self.cam_orders = ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT']
+        self.drop_camera = camera_view_drop
+        if self.drop_camera:
+            print("camera_drop is True")
+    
     def transform(self, results: dict) -> Optional[dict]:
         """Call function to load multi-view image from files.
 
@@ -185,6 +196,8 @@ class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
                 mmcv.impad(img, shape=pad_shape, pad_val=0) for img in imgs
             ]
         img = np.stack(imgs, axis=-1)
+        if self.drop_camera:
+            img = np.zeros_like(img)
         if self.to_float32:
             img = img.astype(np.float32)
 

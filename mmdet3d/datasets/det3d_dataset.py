@@ -294,6 +294,16 @@ class Det3DDataset(BaseDataset):
                     else:
                         sweep['lidar_points']['lidar_path'] = osp.join(
                             self.data_prefix['sweeps'], file_suffix)
+            if self.lidar_stuck:
+                lidar_path = info['lidar_path']
+                file_name = lidar_path.split('/')[-1]
+                if self.noise_data[file_name]['noise']['drop_frames'][self.drop_ratio][self.drop_type]['stuck']:
+                    replace_file = self.noise_data[file_name]['noise']['drop_frames'][self.drop_ratio][self.drop_type]['replace']
+                    if replace_file != '':
+                        lidar_path = lidar_path.replace(file_name, replace_file)
+                        info['lidar_path']=lidar_path
+                        info['lidar_sweeps']= self.noise_data[replace_file]['mmdet_info']['sweeps']
+                        info['timestamp']=self.noise_data[replace_file]['mmdet_info']['timestamp']/1e6
 
         if self.modality['use_camera']:
             for cam_id, img_info in info['images'].items():
@@ -304,6 +314,25 @@ class Det3DDataset(BaseDataset):
                         cam_prefix = self.data_prefix.get('img', '')
                     img_info['img_path'] = osp.join(cam_prefix,
                                                     img_info['img_path'])
+                    
+                    if self.camera_stuck:
+                        file_name = img_info['img_path'].split('/')[-1]
+                        if self.noise_data[file_name]['noise']['drop_frames'][self.drop_ratio][self.drop_type]['stuck']:
+                            replace_file = self.noise_data[file_name]['noise']['drop_frames'][self.drop_ratio][self.drop_type]['replace']
+                            if replace_file != '':
+                                img_info['img_path'] = img_info['img_path'].replace(file_name, replace_file)
+                    if self.spatial_misalignment:
+                        file_name = img_info['img_path'].split('/')[-1]
+                        sensor2lidar_rotation = self.noise_data[file_name]['noise']['extrinsics_noise'][f'{self.extrinsics_noise_type}_noise_sensor2lidar_rotation']
+                        sensor2lidar_translation = self.noise_data[file_name]['noise']['extrinsics_noise'][f'{self.extrinsics_noise_type}_noise_sensor2lidar_translation']
+                        lidar2cam_r = np.linalg.inv(sensor2lidar_rotation)
+                        lidar2cam_t = sensor2lidar_translation @ lidar2cam_r.T
+                        lidar2cam_rt = np.eye(4)
+                        lidar2cam_rt[:3, :3] = lidar2cam_r.T
+                        lidar2cam_rt[3, :3] = -lidar2cam_t
+                        img_info['lidar2cam'] = (lidar2cam_rt.T).tolist()
+                                        
+                                        
             if self.default_cam_key is not None:
                 info['img_path'] = info['images'][
                     self.default_cam_key]['img_path']
@@ -319,7 +348,7 @@ class Det3DDataset(BaseDataset):
                 else:
                     info['lidar2img'] = info['cam2img'] @ info['lidar2cam']
 
-        if not self.test_mode:
+        if not self.test_mode or self.object_failure:
             # used in training
             info['ann_info'] = self.parse_ann_info(info)
         if self.test_mode and self.load_eval_anns:
@@ -369,7 +398,6 @@ class Det3DDataset(BaseDataset):
             dict or None: Data dict of the corresponding index.
         """
         ori_input_dict = self.get_data_info(index)
-
         # deepcopy here to avoid inplace modification in pipeline.
         input_dict = copy.deepcopy(ori_input_dict)
 

@@ -13,7 +13,7 @@ from mmengine.fileio import get
 from mmdet3d.registry import TRANSFORMS
 from mmdet3d.structures.bbox_3d import get_box_type
 from mmdet3d.structures.points import BasePoints, get_points_type
-
+from .data_augment_utils import reduce_LiDAR_beams
 
 @TRANSFORMS.register_module()
 class LoadMultiViewImageFromFiles(BaseTransform):
@@ -338,6 +338,8 @@ class LoadPointsFromMultiSweeps(BaseTransform):
                  backend_args: Optional[dict] = None,
                  pad_empty_sweeps: bool = False,
                  remove_close: bool = False,
+                 reduce_beams = False,
+                 limited_fov = False,
                  test_mode: bool = False) -> None:
         self.load_dim = load_dim
         self.sweeps_num = sweeps_num
@@ -350,6 +352,10 @@ class LoadPointsFromMultiSweeps(BaseTransform):
         self.pad_empty_sweeps = pad_empty_sweeps
         self.remove_close = remove_close
         self.test_mode = test_mode
+        self.reduce_beams = reduce_beams
+        self.limited_fov = limited_fov
+        if self.limited_fov:
+            self.point_cloud_angle_range = [-60,60]
 
     def _load_points(self, pts_filename: str) -> np.ndarray:
         """Private function to load point clouds data.
@@ -395,6 +401,28 @@ class LoadPointsFromMultiSweeps(BaseTransform):
         not_close = np.logical_not(np.logical_and(x_filt, y_filt))
         return points[not_close]
 
+    def filter_point_by_angle (self, points):
+        if isinstance(points,np.ndarray):
+            points_numpy =points
+        elif isinstance(points, BasePoints):
+            points_numpy = points.tensor.numpy()
+        else:
+            raise NotImplementedError
+       
+        pts_phi = (np.arctan(points_numpy[:, 0] / points_numpy[:, 1]) + (points_numpy[:, 1] < 0) * np.pi + np.pi * 2) % (np.pi * 2)
+
+
+        pts_phi[pts_phi>np.pi] -=np.pi * 2
+        pts_phi = pts_phi/np.pi * 180
+       
+        assert np.all(-180 <= pts_phi) and np.all(pts_phi <=180)
+
+
+        filt = np.logical_and(pts_phi>=self.point_cloud_angle_range[0], pts_phi<=self.point_cloud_angle_range[1])
+       
+       
+        return points[filt]
+    
     def transform(self, results: dict) -> dict:
         """Call function to load multi-sweep point clouds from files.
 
@@ -435,6 +463,13 @@ class LoadPointsFromMultiSweeps(BaseTransform):
                 points_sweep = self._load_points(
                     sweep['lidar_points']['lidar_path'])
                 points_sweep = np.copy(points_sweep).reshape(-1, self.load_dim)
+                #
+                # TODO: make it more general
+                if self.reduce_beams:
+                    self.reduce_beams = 4
+                    points_sweep = reduce_LiDAR_beams(points_sweep, self.reduce_beams)
+
+                #
                 if self.remove_close:
                     points_sweep = self._remove_close(points_sweep)
                 # bc-breaking: Timestamp has divided 1e6 in pkl infos.
@@ -448,6 +483,8 @@ class LoadPointsFromMultiSweeps(BaseTransform):
                 sweep_points_list.append(points_sweep)
 
         points = points.cat(sweep_points_list)
+        if self.limited_fov:
+            points = self.filter_point_by_angle(points)
         points = points[:, self.use_dim]
         results['points'] = points
         return results
@@ -590,6 +627,7 @@ class LoadPointsFromFile(BaseTransform):
                  load_dim: int = 6,
                  use_dim: Union[int, List[int]] = [0, 1, 2],
                  shift_height: bool = False,
+                 reduce_beams = False,
                  use_color: bool = False,
                  norm_intensity: bool = False,
                  norm_elongation: bool = False,
@@ -608,6 +646,7 @@ class LoadPointsFromFile(BaseTransform):
         self.norm_intensity = norm_intensity
         self.norm_elongation = norm_elongation
         self.backend_args = backend_args
+        self.reduce_beams = reduce_beams
 
     def _load_points(self, pts_filename: str) -> np.ndarray:
         """Private function to load point clouds data.
@@ -645,6 +684,11 @@ class LoadPointsFromFile(BaseTransform):
         pts_file_path = results['lidar_points']['lidar_path']
         points = self._load_points(pts_file_path)
         points = points.reshape(-1, self.load_dim)
+        #
+        if self.reduce_beams:
+            self.reduce_beams = 4
+            points = reduce_LiDAR_beams(points, self.reduce_beams)
+        #
         points = points[:, self.use_dim]
         if self.norm_intensity:
             assert len(self.use_dim) >= 4, \

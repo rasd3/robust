@@ -18,7 +18,7 @@ from mmdet3d.models.dense_heads.centerpoint_head import SeparateHead
 from mmdet3d.models.layers import nms_bev
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import xywhr2xyxyr
-
+from .encoder_utils import LocalContextAttentionBlock, ConvBNReLU
 
 def clip_sigmoid(x, eps=1e-4):
     y = torch.clamp(x.sigmoid_(), min=eps, max=1 - eps)
@@ -39,7 +39,37 @@ class ConvFuser(nn.Sequential):
         )
 
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
+        # image feature, points feature
         return super().forward(torch.cat(inputs, dim=1))
+
+
+@MODELS.register_module()
+class ModalitySpecificLocalCrossAttention(nn.Module):
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super(ModalitySpecificLocalCrossAttention, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.lidar_hidden_channel = 256
+        self.camera_hidden_channel = 80
+        self.conv = nn.Sequential(nn.Conv2d(
+                sum(in_channels), out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(True))
+        self.P_IML = LocalContextAttentionBlock(self.lidar_hidden_channel, self.camera_hidden_channel, self.lidar_hidden_channel, 9)
+        self.I_IML = LocalContextAttentionBlock(self.camera_hidden_channel, self.lidar_hidden_channel, self.camera_hidden_channel, 9)
+        self.P_integration = ConvBNReLU(2 * self.lidar_hidden_channel, self.lidar_hidden_channel, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
+        self.I_integration = ConvBNReLU(2 * self.camera_hidden_channel, self.camera_hidden_channel, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
+
+    def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
+        img_feat = inputs[0]
+        lidar_feat = inputs[1]
+        I2I_feat = self.I_IML(img_feat, lidar_feat)
+        new_img_feat = self.I_integration(torch.cat((I2I_feat, img_feat),dim=1))
+        P2P_feat = self.P_IML(lidar_feat, img_feat)
+        new_lidar_feat = self.P_integration(torch.cat((P2P_feat, lidar_feat),dim=1))
+        inputs = [new_img_feat, new_lidar_feat]
+        return self.conv(torch.cat(inputs, dim=1))
 
 
 @MODELS.register_module()

@@ -1,0 +1,1 @@
+bash tools/dist_train.sh projects/BEVFusion/configs/bevfusion_lidar-cam_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d_CA.py 4 --work-dir work_dirs/CA_residual

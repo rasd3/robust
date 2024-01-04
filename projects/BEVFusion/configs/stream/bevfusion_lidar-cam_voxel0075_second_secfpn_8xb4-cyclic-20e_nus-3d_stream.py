@@ -1,5 +1,5 @@
 _base_ = [
-    './bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py'
+    './bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d_stream.py'
 ]
 point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
 input_modality = dict(use_lidar=True, use_camera=True)
@@ -31,8 +31,7 @@ model = dict(
         init_cfg=dict(
             type='Pretrained',
             checkpoint=  # noqa: E251
-            'pretrained/swint-nuimages-pretrained.pth'
-            #'https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_tiny_patch4_window7_224.pth'  # noqa: E501
+            'https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_tiny_patch4_window7_224.pth'  # noqa: E501
         )),
     img_neck=dict(
         type='GeneralizedLSSFPN',
@@ -173,12 +172,20 @@ test_pipeline = [
         ])
 ]
 
-train_dataloader = dict(
-    dataset=dict(
-        dataset=dict(pipeline=train_pipeline, modality=input_modality)))
-val_dataloader = dict(
-    dataset=dict(pipeline=test_pipeline, modality=input_modality))
-test_dataloader = val_dataloader
+num_gpus = 4
+batch_size = 2
+num_iters_per_epoch = int(28130 // (num_gpus * batch_size) * 4.554)
+num_epochs = 6
+checkpoint_epoch_interval = 1
+train_sequences_split_num = 2
+test_sequences_split_num = 1
+max_iters = num_epochs * num_iters_per_epoch
+# train_dataloader = dict(
+#     dataset=dict(
+#         dataset=dict(pipeline=train_pipeline, modality=input_modality)))
+# val_dataloader = dict(
+#     dataset=dict(pipeline=test_pipeline, modality=input_modality))
+# test_dataloader = val_dataloader
 
 param_scheduler = [
     dict(
@@ -190,11 +197,10 @@ param_scheduler = [
     dict(
         type='CosineAnnealingLR',
         begin=0,
-        T_max=6,
-        end=6,
-        by_epoch=True,
-        eta_min_ratio=0.001,
-        convert_to_iter_based=True),
+        end=max_iters,
+        by_epoch=False,
+        eta_min_ratio=1e-3,
+        ),
     # momentum scheduler
     # During the first 8 epochs, momentum increases from 1 to 0.85 / 0.95
     # during the next 12 epochs, momentum increases from 0.85 / 0.95 to 1
@@ -202,20 +208,97 @@ param_scheduler = [
         type='CosineAnnealingMomentum',
         eta_min=0.85 / 0.95,
         begin=0,
-        end=2.4,
-        by_epoch=True,
-        convert_to_iter_based=True),
+        end=0.399*max_iters,
+        by_epoch=False,
+        ),
     dict(
         type='CosineAnnealingMomentum',
         eta_min=1,
-        begin=2.4,
-        end=6,
-        by_epoch=True,
-        convert_to_iter_based=True)
+        begin=0.399*max_iters,
+        end=max_iters,
+        by_epoch=False,
+        )
 ]
 
+class_names = [
+    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+]
+
+metainfo = dict(classes=class_names)
+dataset_type = 'NuScenesDataset'
+data_root = 'data/nuscenes/'
+data_prefix = dict(
+    pts='samples/LIDAR_TOP',
+    CAM_FRONT='samples/CAM_FRONT',
+    CAM_FRONT_LEFT='samples/CAM_FRONT_LEFT',
+    CAM_FRONT_RIGHT='samples/CAM_FRONT_RIGHT',
+    CAM_BACK='samples/CAM_BACK',
+    CAM_BACK_RIGHT='samples/CAM_BACK_RIGHT',
+    CAM_BACK_LEFT='samples/CAM_BACK_LEFT',
+    sweeps='sweeps/LIDAR_TOP')
+
+
+train_dataloader = dict(
+    #batch_size=2,
+    batch_size=1,
+    num_workers=0,
+    #persistent_workers=True,
+    
+    
+    ### True 여야됨
+    persistent_workers=False,
+    
+    
+    
+    #sampler=dict(type='DefaultSampler', shuffle=True),
+    sampler=dict(type='InfiniteGroupEachSampleInBatchSampler'),
+    dataset=dict(
+        # type='CBGSDataset',
+        # dataset=dict(
+        _delete_=True,
+        type=dataset_type,
+        data_root=data_root,
+        ann_file='nuscenes_infos_train.pkl',
+        pipeline=train_pipeline,
+        metainfo=metainfo,
+        modality=input_modality,
+        test_mode=False,
+        data_prefix=data_prefix,
+        use_valid_flag=True,
+        # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
+        # and box_type_3d='Depth' in sunrgbd and scannet dataset.
+        box_type_3d='LiDAR',
+        use_sequence_group_flag=True,
+        sequences_split_num=train_sequences_split_num,
+        ))
+
+
+val_dataloader = dict(
+    batch_size=1,
+    num_workers=4,
+    persistent_workers=True,
+    drop_last=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        ann_file='nuscenes_infos_val.pkl',
+        pipeline=test_pipeline,
+        metainfo=metainfo,
+        modality=input_modality,
+        data_prefix=data_prefix,
+        test_mode=True,
+        box_type_3d='LiDAR',
+        backend_args=backend_args,
+        use_sequence_group_flag=True,
+        sequences_split_num=test_sequences_split_num))
+
+
 # runtime settings
-train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=1)
+#train_cfg = dict(by_epoch=True, max_epochs=6, val_interval=1)
+#dynamic_intervals = [(max_iters // interval * interval + 1, max_iters)]
+train_cfg = dict(_delete_=True, type='IterBasedTrainLoop', max_iters=max_iters, val_interval=5000)
 val_cfg = dict()
 test_cfg = dict()
 
@@ -229,10 +312,8 @@ optim_wrapper = dict(
 #       or not by default.
 #   - `base_batch_size` = (8 GPUs) x (4 samples per GPU).
 auto_scale_lr = dict(enable=False, base_batch_size=8)
-
-default_hooks = dict(
-    logger=dict(type='LoggerHook', interval=50),
-    checkpoint=dict(type='CheckpointHook', interval=1))
+log_processor = dict(by_epoch=False)
+default_hooks = dict(checkpoint=dict(by_epoch=False, interval=10000))
 del _base_.custom_hooks
 
-load_from = './pretrained/convert_weight.pth'
+load_from='pretrained/convert_weight.pth'
