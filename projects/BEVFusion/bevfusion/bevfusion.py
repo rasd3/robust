@@ -21,6 +21,7 @@ class BEVFusion(Base3DDetector):
 
     def __init__(
         self,
+        freeze_img=False,
         data_preprocessor: OptConfigType = None,
         pts_voxel_encoder: Optional[dict] = None,
         pts_middle_encoder: Optional[dict] = None,
@@ -115,7 +116,10 @@ class BEVFusion(Base3DDetector):
     def init_weights(self) -> None:
         if self.img_backbone is not None:
             self.img_backbone.init_weights()
-
+        if self.freeze_img:
+            if self.img_backbone is not None:
+                for param in self.img_backbone.parameters():
+                    param.requires_grad = False
     @property
     def with_bbox_head(self):
         """bool: Whether the detector has a box head."""

@@ -461,7 +461,7 @@ class LoadPointsFromMultiSweeps(BaseTransform):
             for idx in choices:
                 sweep = results['lidar_sweeps'][idx]
                 points_sweep = self._load_points(
-                    sweep['lidar_points']['lidar_path'])
+                sweep['lidar_points']['lidar_path'])
                 points_sweep = np.copy(points_sweep).reshape(-1, self.load_dim)
                 #
                 # TODO: make it more general

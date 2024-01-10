@@ -303,6 +303,16 @@ class Det3DDataset(BaseDataset):
                         lidar_path = lidar_path.replace(file_name, replace_file)
                         info['lidar_path']=lidar_path
                         info['lidar_sweeps']= self.noise_data[replace_file]['mmdet_info']['sweeps']
+                        for my_dict in info['lidar_sweeps']:
+                            my_dict.update({'lidar_points': copy.deepcopy(my_dict)})
+                            my_dict['lidar_points']['lidar_path'] = my_dict['lidar_points'].pop('data_path', None)
+                            lidar2sensor = np.eye(4)
+                            rot = my_dict['sensor2lidar_rotation']
+                            trans = my_dict['sensor2lidar_translation']
+                            lidar2sensor[:3, :3] = rot.T
+                            lidar2sensor[:3, 3:4] = -1 * np.matmul(rot.T, trans.reshape(3, 1))
+                            lidar2sensor = lidar2sensor.astype(np.float32).tolist()
+                            my_dict['lidar_points']['lidar2sensor'] = lidar2sensor
                         info['timestamp']=self.noise_data[replace_file]['mmdet_info']['timestamp']/1e6
 
         if self.modality['use_camera']:

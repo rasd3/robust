@@ -7,6 +7,7 @@ backend_args = None
 
 model = dict(
     type='BEVFusion',
+    freeze_img=True,
     data_preprocessor=dict(
         type='Det3DDataPreprocessor',
         mean=[123.675, 116.28, 103.53],
