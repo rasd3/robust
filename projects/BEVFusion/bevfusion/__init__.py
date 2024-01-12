@@ -6,9 +6,10 @@ from .sparse_encoder import BEVFusionSparseEncoder
 from .transformer import TransformerDecoderLayer
 from .transforms_3d import (BEVFusionGlobalRotScaleTrans,
                             BEVFusionRandomFlip3D, GridMask, ImageAug3D)
-from .transfusion_head import ConvFuser, TransFusionHead, ModalitySpecificLocalCrossAttention
+from .transfusion_head import ConvFuser, TransFusionHead, ModalitySpecificLocalCrossAttention, GatedNetwork
 from .utils import (BBoxBEVL1Cost, HeuristicAssigner3D, HungarianAssigner3D,
                     IoU3DCost)
+from .deepinteraction_encoder import DeepInteractionEncoder
 
 __all__ = [
     'BEVFusion', 'TransFusionHead', 'ConvFuser', 'ImageAug3D', 'GridMask',
@@ -16,5 +17,5 @@ __all__ = [
     'HeuristicAssigner3D', 'DepthLSSTransform', 'LSSTransform',
     'BEVLoadMultiViewImageFromFiles', 'BEVFusionSparseEncoder',
     'TransformerDecoderLayer', 'BEVFusionRandomFlip3D',
-    'BEVFusionGlobalRotScaleTrans', 'ModalitySpecificLocalCrossAttention'
+    'BEVFusionGlobalRotScaleTrans', 'ModalitySpecificLocalCrossAttention', 'DeepInteractionEncoder', 'GatedNetwork'
 ]

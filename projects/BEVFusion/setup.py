@@ -23,7 +23,10 @@ def make_cuda_ext(name,
             '-D__CUDA_NO_HALF_OPERATORS__',
             '-D__CUDA_NO_HALF_CONVERSIONS__',
             '-D__CUDA_NO_HALF2_OPERATORS__',
-            '-gencode=arch=compute_61,code=sm_61'
+            '-gencode=arch=compute_70,code=sm_70',
+            '-gencode=arch=compute_75,code=sm_75',
+            '-gencode=arch=compute_80,code=sm_80',
+            '-gencode=arch=compute_86,code=sm_86',
         ]
         sources += sources_cuda
     else:

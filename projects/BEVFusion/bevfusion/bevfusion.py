@@ -34,14 +34,18 @@ class BEVFusion(Base3DDetector):
         bbox_head: Optional[dict] = None,
         init_cfg: OptMultiConfig = None,
         seg_head: Optional[dict] = None,
+        imgpts_neck: Optional[dict] = None,
         **kwargs,
     ) -> None:
         voxelize_cfg = data_preprocessor.pop('voxelize_cfg')
+        if 'pillarize_cfg' in data_preprocessor:
+            pillarize_cfg = data_preprocessor.pop('pillarize_cfg')
         super().__init__(
             data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
         self.voxelize_reduce = voxelize_cfg.pop('voxelize_reduce')
         self.pts_voxel_layer = Voxelization(**voxelize_cfg)
+        self.pts_pillar_layer = Voxelization(**pillarize_cfg)
 
         self.pts_voxel_encoder = MODELS.build(pts_voxel_encoder)
 
@@ -58,9 +62,10 @@ class BEVFusion(Base3DDetector):
 
         self.pts_backbone = MODELS.build(pts_backbone)
         self.pts_neck = MODELS.build(pts_neck)
-
+        self.imgpts_neck = MODELS.build(imgpts_neck) if imgpts_neck else None
         self.bbox_head = MODELS.build(bbox_head)
-
+        self.freeze_img = freeze_img
+        
         self.init_weights()
 
     def _forward(self,
@@ -120,6 +125,7 @@ class BEVFusion(Base3DDetector):
             if self.img_backbone is not None:
                 for param in self.img_backbone.parameters():
                     param.requires_grad = False
+
     @property
     def with_bbox_head(self):
         """bool: Whether the detector has a box head."""
@@ -141,7 +147,10 @@ class BEVFusion(Base3DDetector):
         img_aug_matrix,
         lidar_aug_matrix,
         img_metas,
+        pts_feats,
+        pts_metas
     ) -> torch.Tensor:
+
         B, N, C, H, W = x.size()
         x = x.view(B * N, C, H, W).contiguous()
 
@@ -152,8 +161,9 @@ class BEVFusion(Base3DDetector):
             x = x[0]
 
         BN, C, H, W = x.size()
+        if self.imgpts_neck:
+            x, pts_feats = self.imgpts_neck(x, pts_feats, img_metas, pts_metas)
         x = x.view(B, int(BN / B), C, H, W)
-
         with torch.autocast(device_type='cuda', dtype=torch.float32):
             x = self.view_transform(
                 x,
@@ -165,22 +175,26 @@ class BEVFusion(Base3DDetector):
                 lidar_aug_matrix,
                 img_metas,
             )
-        return x
+        return x, pts_feats
 
     def extract_pts_feat(self, batch_inputs_dict) -> torch.Tensor:
         points = batch_inputs_dict['points']
         with torch.autocast('cuda', enabled=False):
             points = [point.float() for point in points]
             feats, coords, sizes = self.voxelize(points)
+            pts_metas = self.voxelize(points, voxel_type='pillar')
             batch_size = coords[-1, 0] + 1
         x = self.pts_middle_encoder(feats, coords, batch_size)
-        return x
+        return x, pts_metas
 
     @torch.no_grad()
-    def voxelize(self, points):
+    def voxelize(self, points, voxel_type='voxel'):
         feats, coords, sizes = [], [], []
         for k, res in enumerate(points):
-            ret = self.pts_voxel_layer(res)
+            if voxel_type == 'voxel':
+                ret = self.pts_voxel_layer(res)
+            elif voxel_type == 'pillar':
+                ret = self.pts_pillar_layer(res)
             if len(ret) == 3:
                 # hard voxelize
                 f, c, n = ret
@@ -191,17 +205,27 @@ class BEVFusion(Base3DDetector):
             feats.append(f)
             coords.append(F.pad(c, (1, 0), mode='constant', value=k))
             if n is not None:
-                sizes.append(n)
-
-        feats = torch.cat(feats, dim=0)
-        coords = torch.cat(coords, dim=0)
+                sizes.append(n) # num_points
+        feats = torch.cat(feats, dim=0) # voxels
+        coords = torch.cat(coords, dim=0) # coors
+        
+        if voxel_type == 'pillar':
+            pts_metas = {}
+            pts_metas['pillars'] = feats
+            pts_metas['pillar_coors'] = coords
+            pts_metas['pts'] = points
+        
+        # HardSimpleVFE
         if len(sizes) > 0:
             sizes = torch.cat(sizes, dim=0)
             if self.voxelize_reduce:
                 feats = feats.sum(
                     dim=1, keepdim=False) / sizes.type_as(feats).view(-1, 1)
                 feats = feats.contiguous()
-
+        if voxel_type == 'pillar':
+            pts_metas['pillar_center'] = feats
+            pts_metas['pillars_num_points'] = sizes
+            return pts_metas
         return feats, coords, sizes
 
     def predict(self, batch_inputs_dict: Dict[str, Optional[Tensor]],
@@ -250,6 +274,7 @@ class BEVFusion(Base3DDetector):
         imgs = batch_inputs_dict.get('imgs', None)
         points = batch_inputs_dict.get('points', None)
         features = []
+        pts_feature, pts_metas = self.extract_pts_feat(batch_inputs_dict)
         if imgs is not None:
             imgs = imgs.contiguous()
             lidar2image, camera_intrinsics, camera2lidar = [], [], []
@@ -267,13 +292,14 @@ class BEVFusion(Base3DDetector):
             camera2lidar = imgs.new_tensor(np.asarray(camera2lidar))
             img_aug_matrix = imgs.new_tensor(np.asarray(img_aug_matrix))
             lidar_aug_matrix = imgs.new_tensor(np.asarray(lidar_aug_matrix))
-            img_feature = self.extract_img_feat(imgs, deepcopy(points),
+            img_feature, pts_feature = self.extract_img_feat(imgs, deepcopy(points),
                                                 lidar2image, camera_intrinsics,
                                                 camera2lidar, img_aug_matrix,
                                                 lidar_aug_matrix,
-                                                batch_input_metas)
+                                                batch_input_metas,
+                                                pts_feature,
+                                                pts_metas)
             features.append(img_feature)
-        pts_feature = self.extract_pts_feat(batch_inputs_dict)
         features.append(pts_feature)
 
         if self.fusion_layer is not None:

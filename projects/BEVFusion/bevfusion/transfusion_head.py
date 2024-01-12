@@ -73,6 +73,40 @@ class ModalitySpecificLocalCrossAttention(nn.Module):
 
 
 @MODELS.register_module()
+class GatedNetwork(nn.Module):
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super(GatedNetwork, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.convbnrelu = nn.Sequential(nn.Conv2d(
+                sum(in_channels), out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(True))
+        concat_features = sum(in_channels)
+        self.conv_cf1=nn.Conv2d(in_channels=concat_features,out_channels=1, kernel_size=3, padding=1)
+        self.conv_cf2=nn.Conv2d(in_channels=concat_features,out_channels=1,kernel_size=3, padding=1)
+        self.sigmoid=nn.Sigmoid()
+    
+    def forward(self, features):
+        
+        img_feat = features[0]
+        lidar_feat = features[1]
+        Gated_features = []  
+        concat_feature = torch.cat([img_feat, lidar_feat], dim=1)
+        
+        conv_output1 = self.conv_cf1(concat_feature)
+        conv_output2 = self.conv_cf2(concat_feature)
+        sigmoid_cf1 = self.sigmoid(conv_output1)
+        sigmoid_cf2 = self.sigmoid(conv_output2) 
+        
+        img_gated_feature= sigmoid_cf1 * img_feat
+        pts_gated_feature= sigmoid_cf2 * lidar_feat
+        Gated_features = torch.cat([img_gated_feature, pts_gated_feature], dim=1)
+        output = self.convbnrelu(Gated_features)
+        return output
+
+@MODELS.register_module()
 class TransFusionHead(nn.Module):
 
     def __init__(
