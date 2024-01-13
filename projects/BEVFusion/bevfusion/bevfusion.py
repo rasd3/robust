@@ -40,12 +40,17 @@ class BEVFusion(Base3DDetector):
         voxelize_cfg = data_preprocessor.pop('voxelize_cfg')
         if 'pillarize_cfg' in data_preprocessor:
             pillarize_cfg = data_preprocessor.pop('pillarize_cfg')
+        else:
+            pillarize_cfg = False
         super().__init__(
             data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
         self.voxelize_reduce = voxelize_cfg.pop('voxelize_reduce')
         self.pts_voxel_layer = Voxelization(**voxelize_cfg)
-        self.pts_pillar_layer = Voxelization(**pillarize_cfg)
+        if pillarize_cfg:
+            self.pts_pillar_layer = Voxelization(**pillarize_cfg)
+        else:
+            self.pts_pillar_layer = False
 
         self.pts_voxel_encoder = MODELS.build(pts_voxel_encoder)
 
@@ -182,7 +187,10 @@ class BEVFusion(Base3DDetector):
         with torch.autocast('cuda', enabled=False):
             points = [point.float() for point in points]
             feats, coords, sizes = self.voxelize(points)
-            pts_metas = self.voxelize(points, voxel_type='pillar')
+            if self.pts_pillar_layer:
+                pts_metas = self.voxelize(points, voxel_type='pillar')
+            else:
+                pts_metas = None
             batch_size = coords[-1, 0] + 1
         x = self.pts_middle_encoder(feats, coords, batch_size)
         return x, pts_metas
