@@ -93,45 +93,50 @@ class ModalitySpecificLocalCrossAttentionMask(nn.Module):
         # trunc_normal_(self.pts_mask_token, mean=0., std=.02)
         self.mask_ratio = mask_ratio
         
-    def img_masking(self, img_feats):
-        clean_img_feats = img_feats.clone().detach()
-        BN, C, H, W = img_feats.shape
+    def img_masking(self, img_feat):
+        clean_img_feat = img_feat.clone().detach()
+        BN, C, H, W = img_feat.shape
         img_mask_idx = np.random.permutation(self.img_token_count)[:self.img_mask_count]
         img_mask = np.zeros(self.img_token_count, dtype=int)
         img_mask[img_mask_idx] = 1
         img_mask = img_mask.reshape((self.img_H, self.img_W))
-        img_mask = torch.tensor(img_mask).to(device=img_feats.device)
-        img_mask_tokens = self.img_mask_token.expand(BN,-1,H,W).to(device=img_feats.device)
-        masked_img_feats = img_feats * (1-img_mask) + img_mask_tokens* img_mask
-        return clean_img_feats, masked_img_feats, img_mask
+        img_mask = torch.tensor(img_mask).to(device=img_feat.device)
+        # img_mask_tokens = self.img_mask_token.expand(BN,-1,H,W).to(device=img_feat.device)
+        img_mask_tokens = torch.zeros(BN,C,H,W).to(device=img_feat.device)
+        masked_img_feat = img_feat * (1-img_mask) + img_mask_tokens* img_mask
+        return clean_img_feat, masked_img_feat, img_mask
     
-    def pts_masking(self, pts_feats):
-        clean_pts_feats = pts_feats.clone().detach()
-        BN, C, H, W = pts_feats.shape
+    def pts_masking(self, pts_feat):
+        clean_pts_feat = pts_feat.clone().detach()
+        BN, C, H, W = pts_feat.shape
         self.pts_mask_count = int(np.ceil(H*W * self.mask_ratio))
         pts_mask_idx = np.random.permutation(H*W)[:self.pts_mask_count]
         pts_mask = np.zeros(H*W, dtype=int)
         pts_mask[pts_mask_idx] = 1
         pts_mask = pts_mask.reshape((H, W))
-        pts_mask = torch.tensor(pts_mask).to(device=pts_feats.device)
-        #pts_mask_tokens = self.pts_mask_token.expand(BN,-1,H,W).to(device=pts_feats.device)
-        pts_mask_tokens = torch.zeros(BN,C,H,W).to(device=pts_feats.device)
-        masked_pts_feats = pts_feats * (1-pts_mask) + pts_mask_tokens* pts_mask
-        return clean_pts_feats, masked_pts_feats, pts_mask
+        pts_mask = torch.tensor(pts_mask).to(device=pts_feat.device)
+        #pts_mask_tokens = self.pts_mask_token.expand(BN,-1,H,W).to(device=pts_feat.device)
+        pts_mask_tokens = torch.zeros(BN,C,H,W).to(device=pts_feat.device)
+        masked_pts_feat = pts_feat * (1-pts_mask) + pts_mask_tokens* pts_mask
+        return clean_pts_feat, masked_pts_feat, pts_mask
     
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
         img_feat = inputs[0]
-        pts_feats = inputs[1]
+        pts_feat = inputs[1]
         prob = np.random.uniform()
         mask_pts = prob < 0.25
-        if mask_pts and pts_feats.requires_grad:
-            clean_pts_feats, masked_pts_feats, pts_mask = self.pts_masking(pts_feats)
-            pts_feats = masked_pts_feats
-        I2I_feat = self.I_IML(img_feat, pts_feats)
+        mask_img = prob < 0.5 and prob > 0.25
+        if mask_pts and pts_feat.requires_grad:
+            clean_pts_feat, masked_pts_feat, pts_mask = self.pts_masking(pts_feat)
+            pts_feat = masked_pts_feat
+        if mask_img and img_feat.requires_grad:
+            clean_img_feat, masked_img_feat, img_mask = self.img_masking(img_feat)
+            img_feat = masked_img_feat
+        I2I_feat = self.I_IML(img_feat, pts_feat)
         new_img_feat = self.I_integration(torch.cat((I2I_feat, img_feat),dim=1))
-        P2P_feat = self.P_IML(pts_feats, img_feat)
-        new_pts_feats = self.P_integration(torch.cat((P2P_feat, pts_feats),dim=1))
-        inputs = [new_img_feat, new_pts_feats]
+        P2P_feat = self.P_IML(pts_feat, img_feat)
+        new_pts_feat = self.P_integration(torch.cat((P2P_feat, pts_feat),dim=1))
+        inputs = [new_img_feat, new_pts_feat]
         return self.conv(torch.cat(inputs, dim=1))
 
 @MODELS.register_module()

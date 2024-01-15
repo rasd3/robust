@@ -109,7 +109,7 @@ pretrained/
 data
 .vscode
 .idea
-
+token
 # custom
 *.pkl
 *.pkl.json
