@@ -18,8 +18,8 @@ from mmdet3d.models.dense_heads.centerpoint_head import SeparateHead
 from mmdet3d.models.layers import nms_bev
 from mmdet3d.registry import MODELS
 from mmdet3d.structures import xywhr2xyxyr
-from .encoder_utils import LocalContextAttentionBlock, ConvBNReLU
-
+from .encoder_utils import LocalContextAttentionBlock_BEV, ConvBNReLU
+from timm.models.layers import trunc_normal_
 def clip_sigmoid(x, eps=1e-4):
     y = torch.clamp(x.sigmoid_(), min=eps, max=1 - eps)
     return y
@@ -56,8 +56,8 @@ class ModalitySpecificLocalCrossAttention(nn.Module):
                 sum(in_channels), out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(True))
-        self.P_IML = LocalContextAttentionBlock(self.lidar_hidden_channel, self.camera_hidden_channel, self.lidar_hidden_channel, 9)
-        self.I_IML = LocalContextAttentionBlock(self.camera_hidden_channel, self.lidar_hidden_channel, self.camera_hidden_channel, 9)
+        self.P_IML = LocalContextAttentionBlock_BEV(self.lidar_hidden_channel, self.camera_hidden_channel, self.lidar_hidden_channel, 9)
+        self.I_IML = LocalContextAttentionBlock_BEV(self.camera_hidden_channel, self.lidar_hidden_channel, self.camera_hidden_channel, 9)
         self.P_integration = ConvBNReLU(2 * self.lidar_hidden_channel, self.lidar_hidden_channel, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
         self.I_integration = ConvBNReLU(2 * self.camera_hidden_channel, self.camera_hidden_channel, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
 
@@ -71,6 +71,68 @@ class ModalitySpecificLocalCrossAttention(nn.Module):
         inputs = [new_img_feat, new_lidar_feat]
         return self.conv(torch.cat(inputs, dim=1))
 
+
+@MODELS.register_module()
+class ModalitySpecificLocalCrossAttentionMask(nn.Module):
+
+    def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5):
+        super(ModalitySpecificLocalCrossAttentionMask, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.lidar_hidden_channel = 256
+        self.camera_hidden_channel = 80
+        self.conv = nn.Sequential(nn.Conv2d(
+                sum(in_channels), out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(True))
+        self.P_IML = LocalContextAttentionBlock_BEV(self.lidar_hidden_channel, self.camera_hidden_channel, self.lidar_hidden_channel, 9)
+        self.I_IML = LocalContextAttentionBlock_BEV(self.camera_hidden_channel, self.lidar_hidden_channel, self.camera_hidden_channel, 9)
+        self.P_integration = ConvBNReLU(2 * self.lidar_hidden_channel, self.lidar_hidden_channel, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
+        self.I_integration = ConvBNReLU(2 * self.camera_hidden_channel, self.camera_hidden_channel, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
+        # self.pts_mask_token = nn.Parameter(torch.zeros(1, self.lidar_hidden_channel, 1, 1))
+        # trunc_normal_(self.pts_mask_token, mean=0., std=.02)
+        self.mask_ratio = mask_ratio
+        
+    def img_masking(self, img_feats):
+        clean_img_feats = img_feats.clone().detach()
+        BN, C, H, W = img_feats.shape
+        img_mask_idx = np.random.permutation(self.img_token_count)[:self.img_mask_count]
+        img_mask = np.zeros(self.img_token_count, dtype=int)
+        img_mask[img_mask_idx] = 1
+        img_mask = img_mask.reshape((self.img_H, self.img_W))
+        img_mask = torch.tensor(img_mask).to(device=img_feats.device)
+        img_mask_tokens = self.img_mask_token.expand(BN,-1,H,W).to(device=img_feats.device)
+        masked_img_feats = img_feats * (1-img_mask) + img_mask_tokens* img_mask
+        return clean_img_feats, masked_img_feats, img_mask
+    
+    def pts_masking(self, pts_feats):
+        clean_pts_feats = pts_feats.clone().detach()
+        BN, C, H, W = pts_feats.shape
+        self.pts_mask_count = int(np.ceil(H*W * self.mask_ratio))
+        pts_mask_idx = np.random.permutation(H*W)[:self.pts_mask_count]
+        pts_mask = np.zeros(H*W, dtype=int)
+        pts_mask[pts_mask_idx] = 1
+        pts_mask = pts_mask.reshape((H, W))
+        pts_mask = torch.tensor(pts_mask).to(device=pts_feats.device)
+        #pts_mask_tokens = self.pts_mask_token.expand(BN,-1,H,W).to(device=pts_feats.device)
+        pts_mask_tokens = torch.zeros(BN,C,H,W).to(device=pts_feats.device)
+        masked_pts_feats = pts_feats * (1-pts_mask) + pts_mask_tokens* pts_mask
+        return clean_pts_feats, masked_pts_feats, pts_mask
+    
+    def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
+        img_feat = inputs[0]
+        pts_feats = inputs[1]
+        prob = np.random.uniform()
+        mask_pts = prob < 0.25
+        if mask_pts and pts_feats.requires_grad:
+            clean_pts_feats, masked_pts_feats, pts_mask = self.pts_masking(pts_feats)
+            pts_feats = masked_pts_feats
+        I2I_feat = self.I_IML(img_feat, pts_feats)
+        new_img_feat = self.I_integration(torch.cat((I2I_feat, img_feat),dim=1))
+        P2P_feat = self.P_IML(pts_feats, img_feat)
+        new_pts_feats = self.P_integration(torch.cat((P2P_feat, pts_feats),dim=1))
+        inputs = [new_img_feat, new_pts_feats]
+        return self.conv(torch.cat(inputs, dim=1))
 
 @MODELS.register_module()
 class GatedNetwork(nn.Module):

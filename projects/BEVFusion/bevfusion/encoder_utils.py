@@ -134,6 +134,59 @@ class LocalContextAttentionBlock(nn.Module):
         out = self.f_weighting(value, weight, self.kernel_size, self.kernel_size)
         return out
 
+class LocalContextAttentionBlock_BEV(nn.Module):
+    def __init__(self, q_in_channels, k_in_channels, out_channels, kernel_size, last_affine=True):
+        super().__init__()
+
+        self.f_similar = similarFunction.apply
+        self.f_weighting = weightingFunction.apply
+
+        self.kernel_size = kernel_size
+        self.query_project = nn.Sequential(ConvBNReLU(q_in_channels,
+                                                                  out_channels,
+                                                                  kernel_size=1,
+                                                                  norm_layer=nn.BatchNorm2d,
+                                                                  activation_layer=nn.ReLU),
+                                           ConvBNReLU(out_channels,
+                                                                  out_channels,
+                                                                  kernel_size=1,
+                                                                  norm_layer=nn.BatchNorm2d,
+                                                                  activation_layer=nn.ReLU))
+        self.key_project = nn.Sequential(ConvBNReLU(k_in_channels,
+                                                                out_channels,
+                                                                kernel_size=1,
+                                                                norm_layer=nn.BatchNorm2d,
+                                                                activation_layer=nn.ReLU),
+                                         ConvBNReLU(out_channels,
+                                                                out_channels,
+                                                                kernel_size=1,
+                                                                norm_layer=nn.BatchNorm2d,
+                                                                activation_layer=nn.ReLU))
+        self.value_project = ConvBNReLU(k_in_channels,
+                                                    out_channels,
+                                                    kernel_size=1,
+                                                    norm_layer=nn.BatchNorm2d,
+                                                    activation_layer=nn.ReLU,
+                                                    affine=last_affine)
+        self.init_weights()
+
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.xavier_uniform_(m.weight)
+                if hasattr(m, 'bias') and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, target_feats, source_feats, **kwargs):
+        query = self.query_project(target_feats)
+        key = self.key_project(source_feats)
+        value = self.value_project(source_feats)
+
+        weight = self.f_similar(query, key, self.kernel_size, self.kernel_size)
+        weight = nn.functional.softmax(weight / math.sqrt(key.size(1)), -1)
+        out = self.f_weighting(value, weight, self.kernel_size, self.kernel_size)
+        return out
+
 class BEVWarp(nn.Module):
     
     def __init__(self):

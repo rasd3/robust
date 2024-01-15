@@ -22,6 +22,7 @@ class BEVFusion(Base3DDetector):
     def __init__(
         self,
         freeze_img=False,
+        freeze_pts=False,
         data_preprocessor: OptConfigType = None,
         pts_voxel_encoder: Optional[dict] = None,
         pts_middle_encoder: Optional[dict] = None,
@@ -35,6 +36,7 @@ class BEVFusion(Base3DDetector):
         init_cfg: OptMultiConfig = None,
         seg_head: Optional[dict] = None,
         imgpts_neck: Optional[dict] = None,
+        masking_encoder: Optional[dict] = None,
         **kwargs,
     ) -> None:
         voxelize_cfg = data_preprocessor.pop('voxelize_cfg')
@@ -68,8 +70,10 @@ class BEVFusion(Base3DDetector):
         self.pts_backbone = MODELS.build(pts_backbone)
         self.pts_neck = MODELS.build(pts_neck)
         self.imgpts_neck = MODELS.build(imgpts_neck) if imgpts_neck else None
+        self.masking_encoder = MODELS.build(masking_encoder) if masking_encoder else None
         self.bbox_head = MODELS.build(bbox_head)
         self.freeze_img = freeze_img
+        self.freeze_pts = freeze_pts
         
         self.init_weights()
 
@@ -131,6 +135,35 @@ class BEVFusion(Base3DDetector):
                 for param in self.img_backbone.parameters():
                     param.requires_grad = False
 
+        if self.freeze_pts:
+            for name, param in self.named_parameters():
+                if 'pts' in name and 'pts_bbox_head' not in name and 'imgpts_neck' not in name:
+                    param.requires_grad = False
+                if 'pts_bbox_head.decoder.0' in name:
+                    param.requires_grad = False
+                if 'imgpts_neck.shared_conv_pts' in name:
+                    param.requires_grad = False
+                if 'pts_bbox_head.heatmap_head' in name and 'pts_bbox_head.heatmap_head_img' not in name:
+                    param.requires_grad = False
+                if 'pts_bbox_head.prediction_heads.0' in name:
+                    param.requires_grad = False
+                if 'pts_bbox_head.class_encoding' in name:
+                    param.requires_grad = False
+            def fix_bn(m):
+                if isinstance(m, nn.BatchNorm1d) or isinstance(m, nn.BatchNorm2d):
+                    m.track_running_stats = False
+            self.pts_voxel_layer.apply(fix_bn)
+            self.pts_voxel_encoder.apply(fix_bn)
+            self.pts_middle_encoder.apply(fix_bn)
+            self.pts_backbone.apply(fix_bn)
+            self.pts_neck.apply(fix_bn)
+            self.pts_bbox_head.heatmap_head.apply(fix_bn)
+            self.pts_bbox_head.class_encoding.apply(fix_bn)
+            self.pts_bbox_head.decoder[0].apply(fix_bn)
+            self.pts_bbox_head.prediction_heads[0].apply(fix_bn)            
+            self.imgpts_neck.shared_conv_pts.apply(fix_bn)
+        
+        
     @property
     def with_bbox_head(self):
         """bool: Whether the detector has a box head."""
@@ -166,8 +199,11 @@ class BEVFusion(Base3DDetector):
             x = x[0]
 
         BN, C, H, W = x.size()
-        if self.imgpts_neck:
-            x, pts_feats = self.imgpts_neck(x, pts_feats, img_metas, pts_metas)
+        if self.imgpts_neck is not None:
+            if self.masking_encoder is not None:
+                x, pts_feats, mask_loss = self.masking_encoder(x, pts_feats, img_metas, pts_metas, self.imgpts_neck)
+            else:    
+                x, pts_feats = self.imgpts_neck(x, pts_feats, img_metas, pts_metas)
         x = x.view(B, int(BN / B), C, H, W)
         with torch.autocast(device_type='cuda', dtype=torch.float32):
             x = self.view_transform(
@@ -180,7 +216,10 @@ class BEVFusion(Base3DDetector):
                 lidar_aug_matrix,
                 img_metas,
             )
-        return x, pts_feats
+        if self.masking_encoder is not None:
+            return x, pts_feats, mask_loss
+        else:
+            return x, pts_feats, None
 
     def extract_pts_feat(self, batch_inputs_dict) -> torch.Tensor:
         points = batch_inputs_dict['points']
@@ -264,7 +303,7 @@ class BEVFusion(Base3DDetector):
                 contains a tensor with shape (num_instances, 7).
         """
         batch_input_metas = [item.metainfo for item in batch_data_samples]
-        feats = self.extract_feat(batch_inputs_dict, batch_input_metas)
+        feats, _ = self.extract_feat(batch_inputs_dict, batch_input_metas)
 
         if self.with_bbox_head:
             outputs = self.bbox_head.predict(feats, batch_input_metas)
@@ -288,6 +327,7 @@ class BEVFusion(Base3DDetector):
             lidar2image, camera_intrinsics, camera2lidar = [], [], []
             img_aug_matrix, lidar_aug_matrix = [], []
             for i, meta in enumerate(batch_input_metas):
+                
                 lidar2image.append(meta['lidar2img'])
                 camera_intrinsics.append(meta['cam2img'])
                 camera2lidar.append(meta['cam2lidar'])
@@ -300,7 +340,7 @@ class BEVFusion(Base3DDetector):
             camera2lidar = imgs.new_tensor(np.asarray(camera2lidar))
             img_aug_matrix = imgs.new_tensor(np.asarray(img_aug_matrix))
             lidar_aug_matrix = imgs.new_tensor(np.asarray(lidar_aug_matrix))
-            img_feature, pts_feature = self.extract_img_feat(imgs, deepcopy(points),
+            img_feature, pts_feature, mask_loss = self.extract_img_feat(imgs, deepcopy(points),
                                                 lidar2image, camera_intrinsics,
                                                 camera2lidar, img_aug_matrix,
                                                 lidar_aug_matrix,
@@ -309,7 +349,6 @@ class BEVFusion(Base3DDetector):
                                                 pts_metas)
             features.append(img_feature)
         features.append(pts_feature)
-
         if self.fusion_layer is not None:
             x = self.fusion_layer(features)
         else:
@@ -319,18 +358,19 @@ class BEVFusion(Base3DDetector):
         x = self.pts_backbone(x)
         x = self.pts_neck(x)
 
-        return x
+        return x, mask_loss
 
     def loss(self, batch_inputs_dict: Dict[str, Optional[Tensor]],
              batch_data_samples: List[Det3DDataSample],
              **kwargs) -> List[Det3DDataSample]:
         batch_input_metas = [item.metainfo for item in batch_data_samples]
-        feats = self.extract_feat(batch_inputs_dict, batch_input_metas)
+        feats, mask_loss = self.extract_feat(batch_inputs_dict, batch_input_metas)
 
         losses = dict()
         if self.with_bbox_head:
             bbox_loss = self.bbox_head.loss(feats, batch_data_samples)
-
+        if mask_loss is not None:
+            losses.update({'mask_loss':mask_loss})
         losses.update(bbox_loss)
 
         return losses
