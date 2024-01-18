@@ -46,15 +46,15 @@ class ConvFuser(nn.Sequential):
 @MODELS.register_module()
 class ModalitySpecificLocalCrossAttentionlayer(nn.Module):
 
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size):
         super(ModalitySpecificLocalCrossAttentionlayer, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.lidar_hidden_channel = 256
         self.camera_hidden_channel = 80
         
-        self.P_IML = LocalContextAttentionBlock_BEV(self.lidar_hidden_channel, self.camera_hidden_channel, self.lidar_hidden_channel, 9)
-        self.I_IML = LocalContextAttentionBlock_BEV(self.camera_hidden_channel, self.lidar_hidden_channel, self.camera_hidden_channel, 9)
+        self.P_IML = LocalContextAttentionBlock_BEV(self.lidar_hidden_channel, self.camera_hidden_channel, self.lidar_hidden_channel, kernel_size)
+        self.I_IML = LocalContextAttentionBlock_BEV(self.camera_hidden_channel, self.lidar_hidden_channel, self.camera_hidden_channel, kernel_size)
         self.P_integration = ConvBNReLU(2 * self.lidar_hidden_channel, self.lidar_hidden_channel, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
         self.I_integration = ConvBNReLU(2 * self.camera_hidden_channel, self.camera_hidden_channel, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
 
@@ -72,7 +72,8 @@ class ModalitySpecificLocalCrossAttentionlayer(nn.Module):
 @MODELS.register_module()
 class ModalitySpecificLocalCrossAttention(nn.Module):
 
-    def __init__(self, in_channels: int, out_channels: int, num_layers=1):
+    def __init__(self, in_channels: int, out_channels: int, num_layers=1, kernel_size=9, bn_momentum=0.1,
+                bias='auto'):
         super(ModalitySpecificLocalCrossAttention, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -84,10 +85,41 @@ class ModalitySpecificLocalCrossAttention(nn.Module):
             nn.ReLU(True))
         self.num_layers=num_layers
         self.cross_attn_list=nn.ModuleList()
+        in_channels_img = in_channels[0]
+        in_channels_pts = in_channels[1]
+        self.shared_conv_pts = build_conv_layer(
+            dict(type='Conv2d'),
+            in_channels_pts,
+            in_channels_pts,
+            kernel_size=3,
+            padding=1,
+            bias=bias,
+        )
+        self.shared_conv_img = build_conv_layer(
+            dict(type='Conv2d'),
+            in_channels_img,
+            in_channels_img,
+            kernel_size=3,
+            padding=1,
+            bias=bias,
+        )
         for i in range(num_layers):
-            self.cross_attn_list.append(ModalitySpecificLocalCrossAttentionlayer(in_channels, out_channels))
+            self.cross_attn_list.append(ModalitySpecificLocalCrossAttentionlayer(in_channels, out_channels, kernel_size))
+        
+        self.bn_momentum = bn_momentum
+        self.init_weights()
 
+    def init_weights(self):
+        self.init_bn_momentum()
+
+    def init_bn_momentum(self):
+        for m in self.modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                m.momentum = self.bn_momentum
+        
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
+        inputs[0] = self.shared_conv_img(inputs[0])
+        inputs[1] = self.shared_conv_pts(inputs[1])
         for idx in range(self.num_layers):
             inputs = self.cross_attn_list[idx](inputs)
         return self.conv(torch.cat(inputs, dim=1))
