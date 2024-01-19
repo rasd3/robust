@@ -4,7 +4,7 @@ nvcc = /usr/local/cuda/bin/nvcc
 
 cflags = -DTORCH_EXTENSION_NAME=localattention -DTORCH_API_INCLUDE_EXTENSION_H -DPYBIND11_COMPILER_TYPE=\"_gcc\" -DPYBIND11_STDLIB=\"_libstdcpp\" -DPYBIND11_BUILD_ABI=\"_cxxabi1011\" -isystem /opt/conda/lib/python3.8/site-packages/torch/include -isystem /opt/conda/lib/python3.8/site-packages/torch/include/torch/csrc/api/include -isystem /opt/conda/lib/python3.8/site-packages/torch/include/TH -isystem /opt/conda/lib/python3.8/site-packages/torch/include/THC -isystem /usr/local/cuda/include -isystem /opt/conda/include/python3.8 -D_GLIBCXX_USE_CXX11_ABI=0 -fPIC -std=c++14
 post_cflags = 
-cuda_cflags = -DTORCH_EXTENSION_NAME=localattention -DTORCH_API_INCLUDE_EXTENSION_H -DPYBIND11_COMPILER_TYPE=\"_gcc\" -DPYBIND11_STDLIB=\"_libstdcpp\" -DPYBIND11_BUILD_ABI=\"_cxxabi1011\" -isystem /opt/conda/lib/python3.8/site-packages/torch/include -isystem /opt/conda/lib/python3.8/site-packages/torch/include/torch/csrc/api/include -isystem /opt/conda/lib/python3.8/site-packages/torch/include/TH -isystem /opt/conda/lib/python3.8/site-packages/torch/include/THC -isystem /usr/local/cuda/include -isystem /opt/conda/include/python3.8 -D_GLIBCXX_USE_CXX11_ABI=0 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75 --compiler-options '-fPIC' -DCUDA_HAS_FP16=1 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ -std=c++14
+cuda_cflags = -DTORCH_EXTENSION_NAME=localattention -DTORCH_API_INCLUDE_EXTENSION_H -DPYBIND11_COMPILER_TYPE=\"_gcc\" -DPYBIND11_STDLIB=\"_libstdcpp\" -DPYBIND11_BUILD_ABI=\"_cxxabi1011\" -isystem /opt/conda/lib/python3.8/site-packages/torch/include -isystem /opt/conda/lib/python3.8/site-packages/torch/include/torch/csrc/api/include -isystem /opt/conda/lib/python3.8/site-packages/torch/include/TH -isystem /opt/conda/lib/python3.8/site-packages/torch/include/THC -isystem /usr/local/cuda/include -isystem /opt/conda/include/python3.8 -D_GLIBCXX_USE_CXX11_ABI=0 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_86,code=compute_86 -gencode=arch=compute_86,code=sm_86 --compiler-options '-fPIC' -DCUDA_HAS_FP16=1 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ -std=c++14
 cuda_post_cflags = 
 ldflags = -shared -L/opt/conda/lib/python3.8/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda_cu -ltorch_cuda_cpp -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart
 
@@ -21,9 +21,9 @@ rule cuda_compile
 rule link
   command = $cxx $in $ldflags -o $out
 
-build similar.cuda.o: cuda_compile /mnt/sda/konyul/sensorfusion/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/similar.cu
-build weighting.cuda.o: cuda_compile /mnt/sda/konyul/sensorfusion/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/weighting.cu
-build localAttention.o: compile /mnt/sda/konyul/sensorfusion/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/localAttention.cpp
+build similar.cuda.o: cuda_compile /media/spalab/sdb/kypark/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/similar.cu
+build weighting.cuda.o: cuda_compile /media/spalab/sdb/kypark/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/weighting.cu
+build localAttention.o: compile /media/spalab/sdb/kypark/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/localAttention.cpp
 
 build localattention.so: link similar.cuda.o weighting.cuda.o localAttention.o
 

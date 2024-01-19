@@ -127,7 +127,7 @@ class ModalitySpecificLocalCrossAttention(nn.Module):
 @MODELS.register_module()
 class ModalitySpecificLocalCrossAttentionMask(nn.Module):
 
-    def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5):
+    def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5, mask_pts=False, mask_img=False):
         super(ModalitySpecificLocalCrossAttentionMask, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -144,6 +144,8 @@ class ModalitySpecificLocalCrossAttentionMask(nn.Module):
         # self.pts_mask_token = nn.Parameter(torch.zeros(1, self.lidar_hidden_channel, 1, 1))
         # trunc_normal_(self.pts_mask_token, mean=0., std=.02)
         self.mask_ratio = mask_ratio
+        self.mask_pts = mask_pts
+        self.mask_img = mask_img
         
     def img_masking(self, img_feat):
         clean_img_feat = img_feat.clone().detach()
@@ -189,7 +191,19 @@ class ModalitySpecificLocalCrossAttentionMask(nn.Module):
         P2P_feat = self.P_IML(pts_feat, img_feat)
         new_pts_feat = self.P_integration(torch.cat((P2P_feat, pts_feat),dim=1))
         inputs = [new_img_feat, new_pts_feat]
-        return self.conv(torch.cat(inputs, dim=1))
+        if mask_pts and pts_feat.requires_grad:
+            pts_loss = F.l1_loss(new_pts_feat, clean_pts_feat, reduction='none')
+            pts_loss = (pts_loss * pts_mask).sum() / (pts_mask.sum() + 1e-5) / 256
+        else:
+            pts_loss = False
+        if False:
+            if mask_img and img_feat.requires_grad:
+                img_loss = F.l1_loss(new_img_feat, clean_img_feat, reduction='none')
+                img_loss = (img_loss * img_mask).sum() / (img_mask.sum() + 1e-5) / 80
+            else:
+                img_loss = False
+        return self.conv(torch.cat(inputs, dim=1)), pts_loss
+    
 
 @MODELS.register_module()
 class GatedNetwork(nn.Module):

@@ -303,7 +303,7 @@ class BEVFusion(Base3DDetector):
                 contains a tensor with shape (num_instances, 7).
         """
         batch_input_metas = [item.metainfo for item in batch_data_samples]
-        feats, _ = self.extract_feat(batch_inputs_dict, batch_input_metas)
+        feats, _, _= self.extract_feat(batch_inputs_dict, batch_input_metas)
 
         if self.with_bbox_head:
             outputs = self.bbox_head.predict(feats, batch_input_metas)
@@ -350,7 +350,11 @@ class BEVFusion(Base3DDetector):
             features.append(img_feature)
         features.append(pts_feature)
         if self.fusion_layer is not None:
-            x = self.fusion_layer(features)
+            if 'mask_ratio' in self.fusion_layer.__dict__:
+                x, pts_loss = self.fusion_layer(features)    
+            else:
+                x = self.fusion_layer(features)
+                pts_loss = None
         else:
             assert len(features) == 1, features
             x = features[0]
@@ -358,17 +362,18 @@ class BEVFusion(Base3DDetector):
         x = self.pts_backbone(x)
         x = self.pts_neck(x)
 
-        return x, mask_loss
+        return x, mask_loss, pts_loss
 
     def loss(self, batch_inputs_dict: Dict[str, Optional[Tensor]],
              batch_data_samples: List[Det3DDataSample],
              **kwargs) -> List[Det3DDataSample]:
         batch_input_metas = [item.metainfo for item in batch_data_samples]
-        feats, mask_loss = self.extract_feat(batch_inputs_dict, batch_input_metas)
-
+        feats, mask_loss, pts_loss = self.extract_feat(batch_inputs_dict, batch_input_metas)
         losses = dict()
         if self.with_bbox_head:
             bbox_loss = self.bbox_head.loss(feats, batch_data_samples)
+        if pts_loss:
+            losses.update({'pts_loss':pts_loss})
         if mask_loss is not None:
             losses.update({'mask_loss':mask_loss})
         losses.update(bbox_loss)
