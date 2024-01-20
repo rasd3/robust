@@ -123,12 +123,12 @@ class ModalitySpecificLocalCrossAttention(nn.Module):
         for idx in range(self.num_layers):
             inputs = self.cross_attn_list[idx](inputs)
         return self.conv(torch.cat(inputs, dim=1))
-
+    
 @MODELS.register_module()
-class ModalitySpecificLocalCrossAttentionMask(nn.Module):
+class ModalitySpecificLocalCrossAttentionMask_old(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5, mask_pts=False, mask_img=False):
-        super(ModalitySpecificLocalCrossAttentionMask, self).__init__()
+        super(ModalitySpecificLocalCrossAttentionMask_old, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.lidar_hidden_channel = 256
@@ -203,6 +203,110 @@ class ModalitySpecificLocalCrossAttentionMask(nn.Module):
             else:
                 img_loss = False
         return self.conv(torch.cat(inputs, dim=1)), pts_loss
+    
+@MODELS.register_module()
+class ModalitySpecificLocalCrossAttentionMask(nn.Module):
+
+    def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5, mask_pts=False, mask_img=False, num_layers=1, kernel_size=9, bn_momentum=0.1, bias='auto'):
+        super(ModalitySpecificLocalCrossAttentionMask, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.lidar_hidden_channel = 256
+        self.camera_hidden_channel = 80
+        self.conv = nn.Sequential(nn.Conv2d(
+                sum(in_channels), out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(True))
+        # self.pts_mask_token = nn.Parameter(torch.zeros(1, self.lidar_hidden_channel, 1, 1))
+        # trunc_normal_(self.pts_mask_token, mean=0., std=.02)
+        self.mask_ratio = mask_ratio
+        self.mask_pts = mask_pts
+        self.mask_img = mask_img
+        self.num_layers=num_layers
+        self.cross_attn_list=nn.ModuleList()
+        in_channels_img = in_channels[0]
+        in_channels_pts = in_channels[1]
+        self.shared_conv_pts = build_conv_layer(
+            dict(type='Conv2d'),
+            in_channels_pts,
+            in_channels_pts,
+            kernel_size=3,
+            padding=1,
+            bias=bias,
+        )
+        self.shared_conv_img = build_conv_layer(
+            dict(type='Conv2d'),
+            in_channels_img,
+            in_channels_img,
+            kernel_size=3,
+            padding=1,
+            bias=bias,
+        )
+        for i in range(num_layers):
+            self.cross_attn_list.append(ModalitySpecificLocalCrossAttentionlayer(in_channels, out_channels, kernel_size))
+        
+        self.bn_momentum = bn_momentum
+        self.init_weights()
+        
+    def init_weights(self):
+        self.init_bn_momentum()
+
+    def init_bn_momentum(self):
+        for m in self.modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                m.momentum = self.bn_momentum
+        
+    def img_masking(self, img_feat):
+        clean_img_feat = img_feat.clone().detach()
+        BN, C, H, W = img_feat.shape
+        self.img_mask_count = int(np.ceil(H*W * self.mask_ratio))
+        img_mask_idx = np.random.permutation(H*W)[:self.img_mask_count]
+        img_mask = np.zeros(H*W, dtype=int)
+        img_mask[img_mask_idx] = 1
+        img_mask = img_mask.reshape((H, W))
+        img_mask = torch.tensor(img_mask).to(device=img_feat.device)
+        # img_mask_tokens = self.img_mask_token.expand(BN,-1,H,W).to(device=img_feat.device)
+        img_mask_tokens = torch.zeros(BN,C,H,W).to(device=img_feat.device)
+        masked_img_feat = img_feat * (1-img_mask) + img_mask_tokens* img_mask
+        return clean_img_feat, masked_img_feat, img_mask
+    
+    def pts_masking(self, pts_feat):
+        clean_pts_feat = pts_feat.clone().detach()
+        BN, C, H, W = pts_feat.shape
+        self.pts_mask_count = int(np.ceil(H*W * self.mask_ratio))
+        pts_mask_idx = np.random.permutation(H*W)[:self.pts_mask_count]
+        pts_mask = np.zeros(H*W, dtype=int)
+        pts_mask[pts_mask_idx] = 1
+        pts_mask = pts_mask.reshape((H, W))
+        pts_mask = torch.tensor(pts_mask).to(device=pts_feat.device)
+        #pts_mask_tokens = self.pts_mask_token.expand(BN,-1,H,W).to(device=pts_feat.device)
+        pts_mask_tokens = torch.zeros(BN,C,H,W).to(device=pts_feat.device)
+        masked_pts_feat = pts_feat * (1-pts_mask) + pts_mask_tokens* pts_mask
+        return clean_pts_feat, masked_pts_feat, pts_mask
+    
+    def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
+        inputs[0] = self.shared_conv_img(inputs[0])
+        inputs[1] = self.shared_conv_pts(inputs[1])
+        prob = np.random.uniform()
+        mask_pts = prob < 0.25
+        mask_img = prob < 0.5 and prob > 0.25
+        if mask_pts and inputs[1].requires_grad:
+            clean_pts_feat, masked_pts_feat, pts_mask = self.pts_masking(inputs[1])
+            inputs[1] = masked_pts_feat
+        if mask_img and inputs[0].requires_grad:
+            clean_img_feat, masked_img_feat, img_mask = self.img_masking(inputs[0])
+            inputs[0] = masked_img_feat
+        for idx in range(self.num_layers):
+            inputs = self.cross_attn_list[idx](inputs)
+        if mask_pts and inputs[1].requires_grad:
+            pts_loss = F.l1_loss(inputs[1], clean_pts_feat, reduction='none')
+            pts_loss = (pts_loss * pts_mask).sum() / (pts_mask.sum() + 1e-5) / 256
+            return self.conv(torch.cat(inputs, dim=1)), pts_loss
+        if mask_img and inputs[0].requires_grad:
+            img_loss = F.l1_loss(inputs[0], clean_img_feat, reduction='none')
+            img_loss = (img_loss * img_mask).sum() / (img_mask.sum() + 1e-5) / 80
+            return self.conv(torch.cat(inputs, dim=1)), img_loss
+        return self.conv(torch.cat(inputs, dim=1)), False
     
 
 @MODELS.register_module()
