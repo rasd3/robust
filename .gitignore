@@ -6,7 +6,7 @@ __pycache__/
 core
 # C extensions
 *.so
-
+checkpoint
 # Distribution / packaging
 .Python
 build/

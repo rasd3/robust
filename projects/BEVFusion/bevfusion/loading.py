@@ -8,7 +8,8 @@ from mmengine.fileio import get
 
 from mmdet3d.datasets.transforms import LoadMultiViewImageFromFiles
 from mmdet3d.registry import TRANSFORMS
-
+import pickle, os
+import time
 
 @TRANSFORMS.register_module()
 class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
@@ -36,12 +37,30 @@ class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
                  to_float32: bool = False,
                  color_type: str = 'unchanged',
                  backend_args: Optional[dict] = None,
-                 camera_view_drop = False) -> None:
+                 camera_view_drop = False,
+                 occlusion = False) -> None:
         super().__init__(to_float32=to_float32, color_type=color_type, backend_args=backend_args)
         self.cam_orders = ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT']
         self.drop_camera = camera_view_drop
+        self.occlusion = occlusion
+        if self.occlusion:
+            noise_nuscenes_ann_file = 'data/nuscenes/nuscenes_infos_val_with_noise.pkl'
+            noise_data = pickle.load(open(noise_nuscenes_ann_file,'rb'))
+            self.noise_camera_data = noise_data['camera']
+            mask_file = 'Mud_Mask_selected'
+            self.mask_file = mask_file    
         if self.drop_camera:
             print("camera_drop is True")
+    
+    def put_mask_on_img(self, img, mask):
+        h, w = img.shape[:2]
+        mask = np.rot90(mask)
+        mask = mmcv.imresize(mask, (w, h), return_scale=False)
+        alpha = mask / 255
+        alpha = np.power(alpha, 3)
+        img_with_mask = alpha * img + (1 - alpha) * mask
+
+        return img_with_mask
     
     def transform(self, results: dict) -> Optional[dict]:
         """Call function to load multi-view image from files.
@@ -198,6 +217,18 @@ class BEVLoadMultiViewImageFromFiles(LoadMultiViewImageFromFiles):
         img = np.stack(imgs, axis=-1)
         if self.drop_camera:
             img = np.zeros_like(img)
+        if self.occlusion:
+            img_lists = []
+            for name_idx in range(len(results['img_path'])):
+                name = results['img_path'][name_idx]
+                single_img = img[:,:,:,name_idx]
+                noise_index = name.split('/')[-1]
+                mask_id_png = 'mask_'+ str(self.noise_camera_data[noise_index]['noise']['mask_noise']['mask_id']) + '.jpg'
+                mask_name = os.path.join(self.mask_file, mask_id_png)
+                mask = mmcv.imread(mask_name, self.color_type)
+                single_img = self.put_mask_on_img(single_img, mask)
+                img_lists.append(single_img)
+            img = np.stack(img_lists, axis=-1)    
         if self.to_float32:
             img = img.astype(np.float32)
 

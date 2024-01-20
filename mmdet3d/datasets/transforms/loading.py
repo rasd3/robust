@@ -340,6 +340,7 @@ class LoadPointsFromMultiSweeps(BaseTransform):
                  remove_close: bool = False,
                  reduce_beams = False,
                  limited_fov = False,
+                 lidar_drop = False,
                  test_mode: bool = False) -> None:
         self.load_dim = load_dim
         self.sweeps_num = sweeps_num
@@ -354,6 +355,7 @@ class LoadPointsFromMultiSweeps(BaseTransform):
         self.test_mode = test_mode
         self.reduce_beams = reduce_beams
         self.limited_fov = limited_fov
+        self.lidar_drop = lidar_drop
         if self.limited_fov:
             self.point_cloud_angle_range = [-60,60]
 
@@ -486,6 +488,8 @@ class LoadPointsFromMultiSweeps(BaseTransform):
         if self.limited_fov:
             points = self.filter_point_by_angle(points)
         points = points[:, self.use_dim]
+        if self.lidar_drop:
+            points.tensor[:] = 0 
         results['points'] = points
         return results
 

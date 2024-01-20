@@ -2702,6 +2702,11 @@ class Randomdropforeground(BaseTransform):
         Returns:
             np.ndarray: Points with those in the boxes removed.
         """
+        # if mmdetection3d
+        boxes[:,[3,4]] = boxes[:,[4,3]] 
+        boxes[:, 6] = -(boxes[:,6]+np.pi/2) 
+        boxes[:, 2] = (boxes[:,2]+boxes[:,5]/2)
+        
         masks = box_np_ops.points_in_rbbox(points.coord.numpy(), boxes)
         points = points[np.logical_not(masks.any(-1))]
         return points

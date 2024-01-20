@@ -21,9 +21,9 @@ rule cuda_compile
 rule link
   command = $cxx $in $ldflags -o $out
 
-build similar.cuda.o: cuda_compile /mnt/sdb/kypark/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/similar.cu
-build weighting.cuda.o: cuda_compile /mnt/sdb/kypark/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/weighting.cu
-build localAttention.o: compile /mnt/sdb/kypark/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/localAttention.cpp
+build similar.cuda.o: cuda_compile /mnt/sda/konyul/sensorfusion/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/similar.cu
+build weighting.cuda.o: cuda_compile /mnt/sda/konyul/sensorfusion/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/weighting.cu
+build localAttention.o: compile /mnt/sda/konyul/sensorfusion/SeparateModalityFusion/projects/BEVFusion/bevfusion/ops/locatt_ops/localAttention.cpp
 
 build localattention.so: link similar.cuda.o weighting.cuda.o localAttention.o
 
