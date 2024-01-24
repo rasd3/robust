@@ -20,6 +20,7 @@ from mmdet3d.registry import MODELS
 from mmdet3d.structures import xywhr2xyxyr
 from .encoder_utils import LocalContextAttentionBlock_BEV, ConvBNReLU
 from timm.models.layers import trunc_normal_
+import math
 def clip_sigmoid(x, eps=1e-4):
     y = torch.clamp(x.sigmoid_(), min=eps, max=1 - eps)
     return y
@@ -123,11 +124,21 @@ class ModalitySpecificLocalCrossAttention(nn.Module):
         for idx in range(self.num_layers):
             inputs = self.cross_attn_list[idx](inputs)
         return self.conv(torch.cat(inputs, dim=1))
-    
+def pos2embed(pos, num_pos_feats=128, temperature=10000):
+    scale = 2 * math.pi
+    pos = pos * scale
+    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device)
+    dim_t = 2 * (dim_t // 2) / num_pos_feats + 1
+    pos_x = pos[..., 0, None] / dim_t
+    pos_y = pos[..., 1, None] / dim_t
+    pos_x = torch.stack((pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()), dim=-1).flatten(-2)
+    pos_y = torch.stack((pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()), dim=-1).flatten(-2)
+    posemb = torch.cat((pos_y, pos_x), dim=-1)
+    return posemb
 @MODELS.register_module()
 class ModalitySpecificLocalCrossAttentionMask(nn.Module):
 
-    def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5, mask_pts=False, mask_img=False, num_layers=1, kernel_size=9, bn_momentum=0.1, bias='auto'):
+    def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5, mask_pts=False, mask_img=False, num_layers=1, kernel_size=9, bn_momentum=0.1, bias='auto', pos_emb=False):
         super(ModalitySpecificLocalCrossAttentionMask, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -164,7 +175,17 @@ class ModalitySpecificLocalCrossAttentionMask(nn.Module):
         )
         for i in range(num_layers):
             self.cross_attn_list.append(ModalitySpecificLocalCrossAttentionlayer(in_channels, out_channels, kernel_size))
-        
+        self.pos_emb = pos_emb
+        self.pts_bev_embedding = nn.Sequential(
+            nn.Linear(256 * 2, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 256)
+        )
+        self.img_bev_embedding = nn.Sequential(
+            nn.Linear(80 * 2, 80),
+            nn.ReLU(inplace=True),
+            nn.Linear(80, 80)
+        )
         self.bn_momentum = bn_momentum
         self.init_weights()
         
@@ -203,19 +224,47 @@ class ModalitySpecificLocalCrossAttentionMask(nn.Module):
         pts_mask_tokens = torch.zeros(BN,C,H,W).to(device=pts_feat.device)
         masked_pts_feat = pts_feat * (1-pts_mask) + pts_mask_tokens* pts_mask
         return clean_pts_feat, masked_pts_feat, pts_mask
+    @property
+    def coords_bev(self):
+        grid_size = [1440,1440]
+        downsample_scale = 8
+        x_size, y_size = (
+            grid_size[1] // downsample_scale,
+            grid_size[0] // downsample_scale
+        )
+        meshgrid = [[0, x_size - 1, x_size], [0, y_size - 1, y_size]]
+        batch_y, batch_x = torch.meshgrid(*[torch.linspace(it[0], it[1], it[2]) for it in meshgrid])
+        batch_x = (batch_x + 0.5) / x_size
+        batch_y = (batch_y + 0.5) / y_size
+        coord_base = torch.cat([batch_x[None], batch_y[None]], dim=0)
+        coord_base = coord_base.view(2, -1).transpose(1, 0) # (H*W, 2)
+        return coord_base
     
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
         inputs[0] = self.shared_conv_img(inputs[0])
         inputs[1] = self.shared_conv_pts(inputs[1])
         prob = np.random.uniform()
-        mask_pts = prob < 0.25
+
         mask_img = prob < 0.5 and prob > 0.25
-        if mask_pts and inputs[1].requires_grad:
-            clean_pts_feat, masked_pts_feat, pts_mask = self.pts_masking(inputs[1])
-            inputs[1] = masked_pts_feat
         if mask_img and inputs[0].requires_grad:
             clean_img_feat, masked_img_feat, img_mask = self.img_masking(inputs[0])
             inputs[0] = masked_img_feat
+        mask_pts = prob < 0.25
+        if mask_pts and inputs[1].requires_grad:
+            clean_pts_feat, masked_pts_feat, pts_mask = self.pts_masking(inputs[1])
+            inputs[1] = masked_pts_feat
+        
+        if self.pos_emb:
+            B,C,H,W = inputs[0].shape
+            B,D,H,W = inputs[1].shape
+            img_bev_pos_embeds = self.img_bev_embedding(pos2embed(self.coords_bev.to(inputs[0].device), num_pos_feats=C))
+            img_bev_pos_embeds = img_bev_pos_embeds.view(H,W,-1).permute(2,0,1).repeat(B,1,1,1)
+            inputs[0] = inputs[0] + img_bev_pos_embeds
+            
+            pts_bev_pos_embeds = self.pts_bev_embedding(pos2embed(self.coords_bev.to(inputs[1].device), num_pos_feats=D))
+            pts_bev_pos_embeds = pts_bev_pos_embeds.view(H,W,-1).permute(2,0,1).repeat(B,1,1,1)
+            inputs[1] = inputs[1] + pts_bev_pos_embeds
+
         for idx in range(self.num_layers):
             inputs = self.cross_attn_list[idx](inputs)
         if mask_pts and inputs[1].requires_grad:
