@@ -69,6 +69,20 @@ class ModalitySpecificLocalCrossAttentionlayer(nn.Module):
         inputs = [new_img_feat, new_lidar_feat]
         return inputs
 
+@MODELS.register_module()
+class ModalitySpecificLocalSelfAttentionlayer(nn.Module):
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size):
+        super(ModalitySpecificLocalSelfAttentionlayer, self).__init__()
+        self.in_channels = in_channels
+        self.IML = LocalContextAttentionBlock_BEV(self.in_channels, self.in_channels, self.in_channels, kernel_size)
+        self.integration = ConvBNReLU(2 * self.in_channels, self.in_channels, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
+
+    def forward(self, inputs):
+        feat = inputs
+        new_feat = self.IML(feat, feat)
+        new_feat = self.integration(torch.cat((new_feat, feat),dim=1))
+        return new_feat
 
 @MODELS.register_module()
 class ModalitySpecificLocalCrossAttention(nn.Module):
@@ -135,6 +149,164 @@ def pos2embed(pos, num_pos_feats=128, temperature=10000):
     pos_y = torch.stack((pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()), dim=-1).flatten(-2)
     posemb = torch.cat((pos_y, pos_x), dim=-1)
     return posemb
+
+
+
+@MODELS.register_module()
+class ModalitySpecificLocalAttentionMask(nn.Module):
+
+    def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5, mask_pts=False, mask_img=False, num_layers=1, kernel_size=9, bn_momentum=0.1, bias='auto', pos_emb=False):
+        super(ModalitySpecificLocalAttentionMask, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.lidar_hidden_channel = 256
+        self.camera_hidden_channel = 80
+        self.conv = nn.Sequential(nn.Conv2d(
+                sum(in_channels), out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(True))
+        # self.pts_mask_token = nn.Parameter(torch.zeros(1, self.lidar_hidden_channel, 1, 1))
+        # trunc_normal_(self.pts_mask_token, mean=0., std=.02)
+        self.mask_ratio = mask_ratio
+        self.mask_pts = mask_pts
+        self.mask_img = mask_img
+        self.num_layers=num_layers
+        self.cross_attn_list=nn.ModuleList()
+        self.img_self_attn_list=nn.ModuleList()
+        self.pts_self_attn_list=nn.ModuleList()
+        in_channels_img = in_channels[0]
+        in_channels_pts = in_channels[1]
+        self.shared_conv_pts = build_conv_layer(
+            dict(type='Conv2d'),
+            in_channels_pts,
+            in_channels_pts,
+            kernel_size=3,
+            padding=1,
+            bias=bias,
+        )
+        self.shared_conv_img = build_conv_layer(
+            dict(type='Conv2d'),
+            in_channels_img,
+            in_channels_img,
+            kernel_size=3,
+            padding=1,
+            bias=bias,
+        )
+        for i in range(num_layers):
+            self.img_self_attn_list.append(ModalitySpecificLocalSelfAttentionlayer(in_channels_img, in_channels_img, kernel_size))
+        for i in range(num_layers):
+            self.pts_self_attn_list.append(ModalitySpecificLocalSelfAttentionlayer(in_channels_pts, in_channels_pts, kernel_size))
+        for i in range(num_layers):
+            self.cross_attn_list.append(ModalitySpecificLocalCrossAttentionlayer(in_channels, out_channels, kernel_size))
+        self.pos_emb = pos_emb
+        self.pts_bev_embedding = nn.Sequential(
+            nn.Linear(256 * 2, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 256)
+        )
+        self.img_bev_embedding = nn.Sequential(
+            nn.Linear(80 * 2, 80),
+            nn.ReLU(inplace=True),
+            nn.Linear(80, 80)
+        )
+        self.bn_momentum = bn_momentum
+        self.init_weights()
+        
+    def init_weights(self):
+        self.init_bn_momentum()
+
+    def init_bn_momentum(self):
+        for m in self.modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                m.momentum = self.bn_momentum
+        
+    def img_masking(self, img_feat):
+        clean_img_feat = img_feat.clone().detach()
+        BN, C, H, W = img_feat.shape
+        self.img_mask_count = int(np.ceil(H*W * self.mask_ratio))
+        img_mask_idx = np.random.permutation(H*W)[:self.img_mask_count]
+        img_mask = np.zeros(H*W, dtype=int)
+        img_mask[img_mask_idx] = 1
+        img_mask = img_mask.reshape((H, W))
+        img_mask = torch.tensor(img_mask).to(device=img_feat.device)
+        # img_mask_tokens = self.img_mask_token.expand(BN,-1,H,W).to(device=img_feat.device)
+        img_mask_tokens = torch.zeros(BN,C,H,W).to(device=img_feat.device)
+        masked_img_feat = img_feat * (1-img_mask) + img_mask_tokens* img_mask
+        return clean_img_feat, masked_img_feat, img_mask
+    
+    def pts_masking(self, pts_feat):
+        clean_pts_feat = pts_feat.clone().detach()
+        BN, C, H, W = pts_feat.shape
+        self.pts_mask_count = int(np.ceil(H*W * self.mask_ratio))
+        pts_mask_idx = np.random.permutation(H*W)[:self.pts_mask_count]
+        pts_mask = np.zeros(H*W, dtype=int)
+        pts_mask[pts_mask_idx] = 1
+        pts_mask = pts_mask.reshape((H, W))
+        pts_mask = torch.tensor(pts_mask).to(device=pts_feat.device)
+        #pts_mask_tokens = self.pts_mask_token.expand(BN,-1,H,W).to(device=pts_feat.device)
+        pts_mask_tokens = torch.zeros(BN,C,H,W).to(device=pts_feat.device)
+        masked_pts_feat = pts_feat * (1-pts_mask) + pts_mask_tokens* pts_mask
+        return clean_pts_feat, masked_pts_feat, pts_mask
+    @property
+    def coords_bev(self):
+        grid_size = [1440,1440]
+        downsample_scale = 8
+        x_size, y_size = (
+            grid_size[1] // downsample_scale,
+            grid_size[0] // downsample_scale
+        )
+        meshgrid = [[0, x_size - 1, x_size], [0, y_size - 1, y_size]]
+        batch_y, batch_x = torch.meshgrid(*[torch.linspace(it[0], it[1], it[2]) for it in meshgrid])
+        batch_x = (batch_x + 0.5) / x_size
+        batch_y = (batch_y + 0.5) / y_size
+        coord_base = torch.cat([batch_x[None], batch_y[None]], dim=0)
+        coord_base = coord_base.view(2, -1).transpose(1, 0) # (H*W, 2)
+        return coord_base
+    
+    def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
+        inputs[0] = self.shared_conv_img(inputs[0])
+        inputs[1] = self.shared_conv_pts(inputs[1])
+        prob = np.random.uniform()
+
+        mask_img = prob < 0.5 and prob > 0.25
+        if mask_img and inputs[0].requires_grad:
+            clean_img_feat, masked_img_feat, img_mask = self.img_masking(inputs[0])
+            inputs[0] = masked_img_feat
+        mask_pts = prob < 0.25
+        if mask_pts and inputs[1].requires_grad:
+            clean_pts_feat, masked_pts_feat, pts_mask = self.pts_masking(inputs[1])
+            inputs[1] = masked_pts_feat
+        
+        if self.pos_emb:
+            B,C,H,W = inputs[0].shape
+            B,D,H,W = inputs[1].shape
+            img_bev_pos_embeds = self.img_bev_embedding(pos2embed(self.coords_bev.to(inputs[0].device), num_pos_feats=C))
+            img_bev_pos_embeds = img_bev_pos_embeds.view(H,W,-1).permute(2,0,1).repeat(B,1,1,1)
+            inputs[0] = inputs[0] + img_bev_pos_embeds
+            
+            pts_bev_pos_embeds = self.pts_bev_embedding(pos2embed(self.coords_bev.to(inputs[1].device), num_pos_feats=D))
+            pts_bev_pos_embeds = pts_bev_pos_embeds.view(H,W,-1).permute(2,0,1).repeat(B,1,1,1)
+            inputs[1] = inputs[1] + pts_bev_pos_embeds
+
+        for self_idx1 in range(self.num_layers):
+            inputs[0] = self.img_self_attn_list[self_idx1](inputs[0])
+        for self_idx2 in range(self.num_layers):
+            inputs[1] = self.pts_self_attn_list[self_idx2](inputs[1])
+        
+        if mask_pts and inputs[1].requires_grad:
+            pts_loss = F.l1_loss(inputs[1], clean_pts_feat, reduction='none')
+            pts_loss = (pts_loss * pts_mask).sum() / (pts_mask.sum() + 1e-5) / 256
+        if mask_img and inputs[0].requires_grad:
+            img_loss = F.l1_loss(inputs[0], clean_img_feat, reduction='none')
+            img_loss = (img_loss * img_mask).sum() / (img_mask.sum() + 1e-5) / 80
+        for idx in range(self.num_layers):
+            inputs = self.cross_attn_list[idx](inputs)
+        if mask_pts and inputs[1].requires_grad:
+            return self.conv(torch.cat(inputs, dim=1)), pts_loss
+        if mask_img and inputs[0].requires_grad:
+            return self.conv(torch.cat(inputs, dim=1)), img_loss
+        return self.conv(torch.cat(inputs, dim=1)), False
+
 @MODELS.register_module()
 class ModalitySpecificLocalCrossAttentionMask(nn.Module):
 

@@ -56,7 +56,7 @@ model = dict(
         dbound=[1.0, 60.0, 0.5],
         downsample=2),
     fusion_layer=dict(
-        type='ModalitySpecificLocalAttentionMask', in_channels=[80, 256], out_channels=256, num_layers=2))
+        type='ModalitySpecificLocalCrossAttentioEncodernMask', in_channels=[80, 256], out_channels=256, num_layers=2))
 
 train_pipeline = [
     dict(
@@ -237,4 +237,3 @@ default_hooks = dict(
 del _base_.custom_hooks
 
 load_from = './pretrained/convert_weight.pth'
-find_unused_parameters=True
