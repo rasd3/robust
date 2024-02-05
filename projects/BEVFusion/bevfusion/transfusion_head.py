@@ -21,10 +21,287 @@ from mmdet3d.structures import xywhr2xyxyr
 from .encoder_utils import LocalContextAttentionBlock_BEV, ConvBNReLU
 from timm.models.layers import trunc_normal_
 import math
+from .deformable_transformer import build_deforamble_transformer
+from .deformable_utils.position_encoding import PositionEmbeddingSine
+from .utils import NestedTensor
+
 def clip_sigmoid(x, eps=1e-4):
     y = torch.clamp(x.sigmoid_(), min=eps, max=1 - eps)
     return y
+    
+@MODELS.register_module()
+class DeformableTransformer(nn.Module):
 
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.mask_freq = kwargs.pop("mask_freq")
+        self.mask_ratio = kwargs.pop("mask_ratio")
+        self.model = build_deforamble_transformer(**kwargs)
+        feat_channels = 256
+        in_channels = [80, 256]
+        self.conv = nn.Sequential(nn.Conv2d(
+                sum(in_channels), feat_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(feat_channels),
+            nn.ReLU(True))
+        self.position_embedding = PositionEmbeddingSine(
+            num_pos_feats= feat_channels // 2, normalize=True)
+        self.input_proj = nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv2d(feat_channels, feat_channels, kernel_size=1),
+                    nn.GroupNorm(32, feat_channels),
+                )])        
+        self.pts_mask_tokens = nn.Parameter(torch.zeros(1, 1, feat_channels))
+        
+        self.pred = nn.Conv2d(feat_channels, feat_channels, kernel_size=1)
+        
+        self.initialize_weights()
+        
+    def initialize_weights(self):
+        for proj in self.input_proj:
+            nn.init.xavier_uniform_(proj[0].weight, gain=1)
+            nn.init.constant_(proj[0].bias, 0)
+        torch.nn.init.normal_(self.pts_mask_tokens, std=.02)
+        # initialize nn.Linear and nn.LayerNorm
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # we use xavier_uniform following official JAX ViT:
+            torch.nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+        
+    def pts_masking(self, x):
+        # code from https://github.com/facebookresearch/mae/blob/main/models_mae.py
+        _x = x.clone().detach()
+        N, L, D = x.shape  # batch, length, dim
+        len_keep = int(L * (1 - self.mask_ratio))
+        
+        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        
+        # sort noise for each sample
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)    
+        pts_mask_tokens = self.pts_mask_tokens.repeat(N, ids_restore.shape[1] + 1 - x_masked.shape[1], 1)
+        x_ = torch.cat([x_masked, pts_mask_tokens],dim=1)
+        x = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, D))  # unshuffle
+        return _x, x, mask
+
+    def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
+        # image feature, points feature
+        
+        prob = np.random.uniform()
+        mask_pts = prob < self.mask_freq
+        
+        if mask_pts and inputs[1].requires_grad:
+            bs, c, h, w = inputs[1].shape
+            pts_feat = inputs[1].flatten(2).transpose(1, 2)
+            pts_target, pts_feat, pts_mask = self.pts_masking(pts_feat)
+            src = pts_feat.view(bs,h,w,c).permute(0,3,1,2) # bs, c, h, w
+        else:
+            src = inputs[1]
+        s_proj = self.input_proj[0](src)
+        masks = torch.zeros(
+                (s_proj.shape[0], s_proj.shape[2], s_proj.shape[3]),
+                dtype=torch.bool,
+                device=s_proj.device,
+            )
+        pos_embeds = self.position_embedding(NestedTensor(s_proj, masks)).to(
+                s_proj.dtype)
+        inputs[1] = self.model([s_proj], [masks], [pos_embeds], query_embed=None)
+        inputs[1] = self.pred(inputs[1])
+        if mask_pts and inputs[1].requires_grad:
+            pts_feat = inputs[1].flatten(2).transpose(1, 2)
+            loss = (pts_feat - pts_target) ** 2
+            loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+            loss = (loss * pts_mask).sum() / pts_mask.sum()  # mean loss on removed patches
+            return self.conv(torch.cat(inputs, dim=1)), loss
+        
+        return self.conv(torch.cat(inputs, dim=1)), False
+
+@MODELS.register_module()
+class ModalitySpecificDecoderMask(nn.Module):
+
+    def __init__(self, in_channels: int, out_channels: int, mask_ratio=0.5, mask_pts=False, mask_img=False, num_layers=1, kernel_size=9, bn_momentum=0.1, bias='auto', pos_emb=False):
+        super(ModalitySpecificDecoderMask, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.lidar_hidden_channel = 256
+        self.camera_hidden_channel = 80
+        self.conv = nn.Sequential(nn.Conv2d(
+                sum(in_channels), out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(True))
+        # self.pts_mask_token = nn.Parameter(torch.zeros(1, self.lidar_hidden_channel, 1, 1))
+        # trunc_normal_(self.pts_mask_token, mean=0., std=.02)
+        self.mask_ratio = mask_ratio
+        self.mask_pts = mask_pts
+        self.mask_img = mask_img
+        in_channels_img = in_channels[0]
+        in_channels_pts = in_channels[1]
+        
+        decoder_embed_dim=256
+        #decoder_num_heads=16
+        decoder_num_heads=1
+        mlp_ratio=1
+        norm_layer=nn.LayerNorm
+        decoder_depth=1
+        self.decoder_embed_img = nn.Linear(in_channels_img, decoder_embed_dim, bias=True)
+        self.decoder_embed_pts = nn.Linear(in_channels_pts, decoder_embed_dim, bias=True)
+        self.img_mask_tokens = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+        self.pts_mask_tokens = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+        self.decoder_pos_embed_img = nn.Parameter(torch.zeros(1, 180*180, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        self.decoder_pos_embed_pts = nn.Parameter(torch.zeros(1, 180*180, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
+        self.decoder_blocks = nn.ModuleList([
+            Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
+            for i in range(decoder_depth)])
+        
+        self.decoder_norm = norm_layer(decoder_embed_dim)
+        self.decoder_pred = nn.Linear(decoder_embed_dim, 180*180 * decoder_embed_dim, bias=True) # decoder to patch
+        self.initialize_weights()
+        
+    def initialize_weights(self):
+        # initialization
+        # initialize (and freeze) pos_embed by sin-cos embedding
+        decoder_pos_embed_img = get_2d_sincos_pos_embed(self.decoder_pos_embed_img.shape[-1], 180, cls_token=False)
+        self.decoder_pos_embed_img.data.copy_(torch.from_numpy(decoder_pos_embed_img).float().unsqueeze(0))
+        decoder_pos_embed_pts = get_2d_sincos_pos_embed(self.decoder_pos_embed_pts.shape[-1], 180, cls_token=False)
+        self.decoder_pos_embed_pts.data.copy_(torch.from_numpy(decoder_pos_embed_pts).float().unsqueeze(0))
+
+        # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
+        torch.nn.init.normal_(self.img_mask_tokens, std=.02)
+        torch.nn.init.normal_(self.pts_mask_tokens, std=.02)
+
+        # initialize nn.Linear and nn.LayerNorm
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # we use xavier_uniform following official JAX ViT:
+            torch.nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def img_masking(self, x):
+        _x = x.clone().detach()
+        N, L, D = x.shape  # batch, length, dim
+        len_keep = int(L * (1 - self.mask_ratio))
+        
+        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        
+        # sort noise for each sample
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)    
+        
+        x_masked = self.decoder_embed_img(x_masked)
+        img_mask_tokens = self.img_mask_tokens.repeat(N, ids_restore.shape[1] + 1 - L, 1)
+        x_ = torch.cat([x_masked, img_mask_tokens],dim=1)
+        x = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, D))  # unshuffle
+        return _x, x, mask
+    
+    def pts_masking(self, x):
+        _x = x.clone().detach()
+        N, L, D = x.shape  # batch, length, dim
+        len_keep = int(L * (1 - self.mask_ratio))
+        
+        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+        
+        # sort noise for each sample
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)    
+        
+        x_masked = self.decoder_embed_pts(x_masked)
+        pts_mask_tokens = self.pts_mask_tokens.repeat(N, ids_restore.shape[1] + 1 - L, 1)
+        x_ = torch.cat([x_masked, pts_mask_tokens],dim=1)
+        x = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, D))  # unshuffle
+        return _x, x, mask
+    
+    
+    def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
+        N,IC,H,W = inputs[0].shape
+        N,PC,H,W = inputs[1].shape
+        img_feat = inputs[0].view(N,IC,H*W).permute(0,2,1).contiguous()
+        pts_feat = inputs[1].view(N,PC,H*W).permute(0,2,1).contiguous()
+        
+        prob = np.random.uniform()
+        mask_img = prob < 0.5 and prob > 0.25
+        mask_pts = prob < 0.25
+        
+        if mask_img and inputs[0].requires_grad:
+            img_target, img_feat, img_mask = self.img_masking(img_feat)
+        else:
+            img_feat = self.decoder_embed_img(img_feat)
+        
+        img_feat = img_feat + self.decoder_pos_embed_img
+        for blk in self.decoder_blocks:
+            import pdb;pdb.set_trace()
+            img_feat = blk(img_feat)
+        import pdb;pdb.set_trace()
+        img_feat = self.decoder_norm(img_feat)
+        # predictor projection
+        img_feat = self.decoder_pred(img_feat)
+        
+        if mask_pts and inputs[1].requires_grad:
+            pts_target, pts_feat, pts_mask = self.pts_masking(pts_feat)
+        else:
+            pts_feat = self.decoder_embed_pts(pts_feat)
+        pts_feat = pts_feat + self.decoder_pos_embed_pts
+        for blk in self.decoder_blocks:
+            pts_feat = blk(pts_feat)
+        pts_feat = self.decoder_norm(pts_feat)
+        # predictor projection
+        pts_feat = self.decoder_pred(pts_feat)
+
+        if mask_img and inputs[0].requires_grad:
+            
+            loss = (img_feat - img_target) ** 2
+            loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+
+            loss = (loss * img_mask).sum() / img_mask.sum()  # mean loss on removed patches
+            return self.conv(torch.cat(inputs, dim=1)), loss
+        
+        if mask_pts and inputs[1].requires_grad:
+            loss = (pts_feat - pts_target) ** 2
+            loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+            loss = (loss * pts_mask).sum() / pts_mask.sum()  # mean loss on removed patches
+            return self.conv(torch.cat(inputs, dim=1)), loss
+        return self.conv(torch.cat(inputs, dim=1)), False
 
 @MODELS.register_module()
 class ConvFuser(nn.Sequential):
