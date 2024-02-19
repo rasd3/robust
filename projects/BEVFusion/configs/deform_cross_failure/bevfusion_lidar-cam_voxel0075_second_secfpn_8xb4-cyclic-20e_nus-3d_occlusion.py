@@ -4,6 +4,7 @@ _base_ = [
 point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
 input_modality = dict(use_lidar=True, use_camera=True)
 backend_args = None
+num_cross_attention_layers=2
 occlusion=True
 model = dict(
     type='BEVFusion',
@@ -61,7 +62,7 @@ model = dict(
         d_model=256,
         nheads=8,
         num_encoder_layers=4,
-        num_cross_attention_layers=1,
+        num_cross_attention_layers=num_cross_attention_layers,
         num_decoder_layers=0,
         dim_feedforward=1024,
         dropout=0.1,
