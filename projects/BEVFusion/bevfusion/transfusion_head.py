@@ -36,7 +36,10 @@ class DeformableTransformer(nn.Module):
         super().__init__()
         self.mask_freq = kwargs.pop("mask_freq")
         self.mask_ratio = kwargs.pop("mask_ratio")
-        self.loss_weight = kwargs.pop("loss_weight")
+        if kwargs.get('loss_weight', False):
+            self.loss_weight = kwargs.pop("loss_weight")
+        else:
+            self.loss_weight = 1
         self.model = build_deforamble_transformer(**kwargs)
         feat_channels = 256
         target_channels = 80
