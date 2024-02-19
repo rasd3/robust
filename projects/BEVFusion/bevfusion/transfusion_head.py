@@ -36,6 +36,7 @@ class DeformableTransformer(nn.Module):
         super().__init__()
         self.mask_freq = kwargs.pop("mask_freq")
         self.mask_ratio = kwargs.pop("mask_ratio")
+        self.loss_weight = kwargs.pop("loss_weight")
         self.model = build_deforamble_transformer(**kwargs)
         feat_channels = 256
         target_channels = 80
@@ -51,11 +52,13 @@ class DeformableTransformer(nn.Module):
                     nn.Conv2d(feat_channels, feat_channels, kernel_size=1),
                     nn.GroupNorm(32, feat_channels),
                 )])        
-        self.target_proj = nn.ModuleList([
-                nn.Sequential(
-                    nn.Conv2d(target_channels, feat_channels, kernel_size=1),
-                    nn.GroupNorm(32, feat_channels),
-                )]) 
+        self.num_cross_attention_layers = kwargs.get('num_cross_attention_layers', False)
+        if self.num_cross_attention_layers:
+            self.target_proj = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Conv2d(target_channels, feat_channels, kernel_size=1),
+                        nn.GroupNorm(32, feat_channels),
+                    )]) 
         self.pts_mask_tokens = nn.Parameter(torch.zeros(1, 1, feat_channels))
         
         self.pred = nn.Conv2d(feat_channels, feat_channels, kernel_size=1)
@@ -66,9 +69,10 @@ class DeformableTransformer(nn.Module):
         for proj in self.input_proj:
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
-        for _proj in self.target_proj:
-            nn.init.xavier_uniform_(_proj[0].weight, gain=1)
-            nn.init.constant_(_proj[0].bias, 0)
+        if self.num_cross_attention_layers:
+            for _proj in self.target_proj:
+                nn.init.xavier_uniform_(_proj[0].weight, gain=1)
+                nn.init.constant_(_proj[0].bias, 0)
         torch.nn.init.normal_(self.pts_mask_tokens, std=.02)
         # initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)
@@ -124,7 +128,10 @@ class DeformableTransformer(nn.Module):
             src = inputs[1]
         s_proj = self.input_proj[0](src)
         target = inputs[0]
-        t_proj = self.target_proj[0](target)
+        if self.num_cross_attention_layers:
+            t_proj = self.target_proj[0](target)
+        else:
+            t_proj = target
         masks = torch.zeros(
                 (s_proj.shape[0], s_proj.shape[2], s_proj.shape[3]),
                 dtype=torch.bool,
@@ -139,6 +146,7 @@ class DeformableTransformer(nn.Module):
             loss = (pts_feat - pts_target) ** 2
             loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
             loss = (loss * pts_mask).sum() / pts_mask.sum()  # mean loss on removed patches
+            loss = self.loss_weight * loss
             return self.conv(torch.cat(inputs, dim=1)), loss
         
         return self.conv(torch.cat(inputs, dim=1)), False

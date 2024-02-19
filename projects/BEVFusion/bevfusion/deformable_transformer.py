@@ -409,7 +409,7 @@ def build_deforamble_transformer(**kwargs):
         d_model=kwargs['d_model'],
         nhead=kwargs['nheads'],
         num_encoder_layers=kwargs['num_encoder_layers'],
-        num_cross_attention_layers=kwargs['num_cross_attention_layers'],
+        num_cross_attention_layers=kwargs.get('num_cross_attention_layers', 0),
         num_decoder_layers=kwargs['num_decoder_layers'],
         dim_feedforward=kwargs['dim_feedforward'],
         dropout=kwargs['dropout'],
