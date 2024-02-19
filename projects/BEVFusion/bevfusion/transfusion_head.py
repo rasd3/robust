@@ -38,6 +38,7 @@ class DeformableTransformer(nn.Module):
         self.mask_ratio = kwargs.pop("mask_ratio")
         self.model = build_deforamble_transformer(**kwargs)
         feat_channels = 256
+        target_channels = 80
         in_channels = [80, 256]
         self.conv = nn.Sequential(nn.Conv2d(
                 sum(in_channels), feat_channels, 3, padding=1, bias=False),
@@ -50,6 +51,11 @@ class DeformableTransformer(nn.Module):
                     nn.Conv2d(feat_channels, feat_channels, kernel_size=1),
                     nn.GroupNorm(32, feat_channels),
                 )])        
+        self.target_proj = nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv2d(target_channels, feat_channels, kernel_size=1),
+                    nn.GroupNorm(32, feat_channels),
+                )]) 
         self.pts_mask_tokens = nn.Parameter(torch.zeros(1, 1, feat_channels))
         
         self.pred = nn.Conv2d(feat_channels, feat_channels, kernel_size=1)
@@ -60,6 +66,9 @@ class DeformableTransformer(nn.Module):
         for proj in self.input_proj:
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
+        for _proj in self.target_proj:
+            nn.init.xavier_uniform_(_proj[0].weight, gain=1)
+            nn.init.constant_(_proj[0].bias, 0)
         torch.nn.init.normal_(self.pts_mask_tokens, std=.02)
         # initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)
@@ -114,6 +123,8 @@ class DeformableTransformer(nn.Module):
         else:
             src = inputs[1]
         s_proj = self.input_proj[0](src)
+        target = inputs[0]
+        t_proj = self.target_proj[0](target)
         masks = torch.zeros(
                 (s_proj.shape[0], s_proj.shape[2], s_proj.shape[3]),
                 dtype=torch.bool,
@@ -121,7 +132,7 @@ class DeformableTransformer(nn.Module):
             )
         pos_embeds = self.position_embedding(NestedTensor(s_proj, masks)).to(
                 s_proj.dtype)
-        inputs[1] = self.model([s_proj], [masks], [pos_embeds], query_embed=None)
+        inputs[1] = self.model([s_proj], [masks], [pos_embeds], [t_proj], query_embed=None)
         inputs[1] = self.pred(inputs[1])
         if mask_pts and inputs[1].requires_grad:
             pts_feat = inputs[1].flatten(2).transpose(1, 2)
