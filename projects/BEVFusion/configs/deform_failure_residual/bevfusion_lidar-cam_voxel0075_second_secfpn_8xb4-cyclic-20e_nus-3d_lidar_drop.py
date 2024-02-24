@@ -1,13 +1,12 @@
 _base_ = [
-    './bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py'
+    '../bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py'
 ]
 point_cloud_range = [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
 input_modality = dict(use_lidar=True, use_camera=True)
 backend_args = None
-
+lidar_drop = True
 model = dict(
     type='BEVFusion',
-    freeze_img=True,
     data_preprocessor=dict(
         type='Det3DDataPreprocessor',
         mean=[123.675, 116.28, 103.53],
@@ -60,7 +59,6 @@ model = dict(
         mask_freq=0.25,
         mask_ratio=0.5,
         residual='sum',
-        loss_weight=1,
         d_model=256,
         nheads=8,
         num_encoder_layers=4,
@@ -170,7 +168,8 @@ test_pipeline = [
         use_dim=5,
         pad_empty_sweeps=True,
         remove_close=True,
-        backend_args=backend_args),
+        backend_args=backend_args,
+        lidar_drop=lidar_drop),
     dict(
         type='ImageAug3D',
         final_dim=[256, 704],
@@ -255,4 +254,3 @@ default_hooks = dict(
 del _base_.custom_hooks
 
 load_from = './pretrained/convert_weight.pth'
-find_unused_parameters=True

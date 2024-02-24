@@ -36,6 +36,10 @@ class DeformableTransformer(nn.Module):
         super().__init__()
         self.mask_freq = kwargs.pop("mask_freq")
         self.mask_ratio = kwargs.pop("mask_ratio")
+        if kwargs.get('residual', False):
+            self.residual = kwargs.pop("residual")
+        else:
+            self.residual = False
         if kwargs.get('loss_weight', False):
             self.loss_weight = kwargs.pop("loss_weight")
         else:
@@ -65,7 +69,8 @@ class DeformableTransformer(nn.Module):
         self.pts_mask_tokens = nn.Parameter(torch.zeros(1, 1, feat_channels))
         
         self.pred = nn.Conv2d(feat_channels, feat_channels, kernel_size=1)
-        
+        if self.residual == 'concat':
+            self.P_integration = ConvBNReLU(2 * feat_channels, feat_channels, kernel_size = 1, norm_layer=nn.BatchNorm2d, activation_layer=None)
         self.initialize_weights()
         
     def initialize_weights(self):
@@ -118,6 +123,8 @@ class DeformableTransformer(nn.Module):
 
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
         # image feature, points feature
+        if self.residual:
+            residual = inputs[1]
         
         prob = np.random.uniform()
         mask_pts = prob < self.mask_freq
@@ -144,6 +151,10 @@ class DeformableTransformer(nn.Module):
                 s_proj.dtype)
         inputs[1] = self.model([s_proj], [masks], [pos_embeds], [t_proj], query_embed=None)
         inputs[1] = self.pred(inputs[1])
+        if self.residual == 'sum':
+            inputs[1] += residual
+        if self.residual == 'concat':
+            inputs[1] = self.P_integration(torch.cat((inputs[1], residual), dim=1))
         if mask_pts and inputs[1].requires_grad:
             pts_feat = inputs[1].flatten(2).transpose(1, 2)
             loss = (pts_feat - pts_target) ** 2
