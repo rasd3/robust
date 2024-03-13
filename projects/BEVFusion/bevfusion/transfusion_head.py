@@ -1,4 +1,5 @@
 # modify from https://github.com/mit-han-lab/bevfusion
+import time
 import copy
 from typing import List, Tuple
 
@@ -25,9 +26,25 @@ from .deformable_transformer import build_deforamble_transformer
 from .deformable_utils.position_encoding import PositionEmbeddingSine
 from .utils import NestedTensor
 
+IDX = 0
+
 def clip_sigmoid(x, eps=1e-4):
     y = torch.clamp(x.sigmoid_(), min=eps, max=1 - eps)
     return y
+
+def vis_bev_feat(x):
+    import cv2
+    global IDX
+
+    B, C, X, Y = x.shape
+    for b in range(B):
+        feat = x[b].max(0)[0]
+        f_max, f_min = feat.max(), feat.min()
+        feat = (feat - f_min) / (f_max - f_min) * 255.
+        feat = feat.to(torch.uint8).cpu().detach().numpy()
+        feat_c = cv2.applyColorMap(feat, cv2.COLORMAP_JET)
+        cv2.imwrite('test_%02d.png' % IDX, feat_c)
+        IDX += 1
     
 @MODELS.register_module()
 class DeformableTransformer(nn.Module):
@@ -36,6 +53,9 @@ class DeformableTransformer(nn.Module):
         super().__init__()
         self.mask_freq = kwargs.pop("mask_freq")
         self.mask_ratio = kwargs.pop("mask_ratio")
+        self.mask_method = kwargs.get('mask_method', 'point')
+        if 'patch' in self.mask_method:
+            self.patch_cfg = kwargs.get('patch_cfg', None)
         if kwargs.get('residual', False):
             self.residual = kwargs.pop("residual")
         else:
@@ -114,12 +134,58 @@ class DeformableTransformer(nn.Module):
         # generate the binary mask: 0 is keep, 1 is remove
         mask = torch.ones([N, L], device=x.device)
         mask[:, :len_keep] = 0
+
         # unshuffle to get the binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)    
         pts_mask_tokens = self.pts_mask_tokens.repeat(N, ids_restore.shape[1] + 1 - x_masked.shape[1], 1)
         x_ = torch.cat([x_masked, pts_mask_tokens],dim=1)
         x = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, D))  # unshuffle
+
         return _x, x, mask
+
+    def random_patch_masking(self, x):
+        B, D, W, H = x.shape
+        mask_tokens = self.pts_mask_tokens.permute(2, 0, 1)
+
+        mask = torch.zeros([B, W, H], device=x.device)
+        for b in range(B):
+            # pick size and number of patch
+            l_min, l_max = self.patch_cfg.len_min, self.patch_cfg.len_max
+            rand_s_l = torch.randint(l_min, l_max, (500,))
+            rand_s_l_sq = torch.cumsum(torch.square(rand_s_l), dim=0)
+            rand_n = (rand_s_l_sq > (W*H*self.mask_ratio)).nonzero()[0][0]
+
+            # masking patch
+            rand_x_l, rand_y_l = torch.randint(0, W, (rand_n, 1)), torch.randint(0, H, (rand_n, 1))
+            for rand_s, rand_x, rand_y in zip(rand_s_l, rand_x_l, rand_y_l):
+                x[b][:, rand_x:rand_x+rand_s, rand_y:rand_y+rand_s] = mask_tokens
+                mask[b][rand_x:rand_x+rand_s, rand_y:rand_y+rand_s] = 1
+
+        return x, mask.flatten(1)
+
+    def grid_patch_masking(self, x):
+        B, D, W, H = x.shape
+        mask_tokens = self.pts_mask_tokens.permute(2, 0, 1)
+
+        mask = torch.zeros([B, W, H], device=x.device)
+        grid_res = self.patch_cfg.grid_res
+        grid_res_2 = W // grid_res
+        
+        for b in range(B):
+            # reshape mask to grid shap
+            grid_mask = mask[b].unfold(0, grid_res_2, grid_res_2).unfold(1, grid_res_2, grid_res_2)
+            grid_x = x[b].unfold(1, grid_res_2, grid_res_2).unfold(2, grid_res_2, grid_res_2)
+
+            # masking
+            half_grid_res = int(grid_res*grid_res*self.mask_ratio)
+            indices = torch.randperm(grid_res*grid_res)
+            mask_indices = indices[:half_grid_res]
+            rows = mask_indices // grid_res
+            cols = mask_indices % grid_res
+            grid_mask[rows, cols] = 1
+            grid_x[:, rows, cols] = mask_tokens.unsqueeze(-1).expand(D, half_grid_res, grid_res_2, grid_res_2)
+
+        return x, mask.flatten(1)
 
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
         # image feature, points feature
@@ -129,11 +195,19 @@ class DeformableTransformer(nn.Module):
         prob = np.random.uniform()
         mask_pts = prob < self.mask_freq
         
+        # test
         if mask_pts and inputs[1].requires_grad:
-            bs, c, h, w = inputs[1].shape
-            pts_feat = inputs[1].flatten(2).transpose(1, 2)
-            pts_target, pts_feat, pts_mask = self.pts_masking(pts_feat)
-            src = pts_feat.view(bs,h,w,c).permute(0,3,1,2) # bs, c, h, w
+            if self.mask_method == 'point':
+                bs, c, h, w = inputs[1].shape
+                pts_feat = inputs[1].flatten(2).transpose(1, 2)
+                pts_target, pts_feat, pts_mask = self.pts_masking(pts_feat)
+                src = pts_feat.view(bs,h,w,c).permute(0,3,1,2) # bs, c, h, w
+            elif self.mask_method == 'random_patch':
+                pts_target = inputs[1].flatten(2).transpose(1, 2)
+                src, pts_mask = self.random_patch_masking(inputs[1])
+            elif self.mask_method == 'grid_patch':
+                pts_target = inputs[1].flatten(2).transpose(1, 2)
+                src, pts_mask = self.grid_patch_masking(inputs[1])
         else:
             src = inputs[1]
         s_proj = self.input_proj[0](src)

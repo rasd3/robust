@@ -54,6 +54,7 @@ def parse_args():
     # will pass the `--local-rank` parameter to `tools/train.py` instead
     # of `--local_rank`.
     parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
+    parser.add_argument('--batch_size', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -67,6 +68,9 @@ def main():
     cfg = Config.fromfile(args.config)
 
     # TODO: We will unify the ceph support approach with other OpenMMLab repos
+    if args.batch_size:
+        cfg.train_dataloader.batch_size = args.batch_size
+
     if args.ceph:
         cfg = replace_ceph_backend(cfg)
 
